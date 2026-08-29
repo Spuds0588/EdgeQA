@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowRight, Check, ChevronDown, Clipboard, GitBranch, KeyRound, Link2, LockKeyhole, Menu, Play, ShieldCheck, Sparkles, X, Zap } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, Clipboard, GitBranch, KeyRound, Link2, LockKeyhole, Menu, ShieldCheck, Sparkles, X, Zap } from "lucide-react";
 import "./index.css";
 import { parseRepoInput } from "./lib/repo";
 
@@ -19,7 +19,6 @@ async function deriveKey(pin: string, salt: BufferSource) {
 
 function bytesToBase64(bytes: Uint8Array) { return btoa(String.fromCharCode(...bytes)); }
 
-
 async function makePayload(token: string, pin: string) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -35,23 +34,19 @@ function App() {
   const [repo, setRepo] = useState("");
   const [branch, setBranch] = useState("main");
   const [repoUrl, setRepoUrl] = useState("");
-  // The token is fine-grained and scoped, but still a secret: keep it out of localStorage/sessionStorage.
-  // sessionStorage is cleared when the tab closes, which balances convenience with safety for a QA tool.
-  const [token, setToken] = useState(() => (typeof sessionStorage !== "undefined" ? sessionStorage.getItem("edgeqa_pat") || "" : ""));
-  const persistToken = (value: string) => { setToken(value); try { if (value) sessionStorage.setItem("edgeqa_pat", value); else sessionStorage.removeItem("edgeqa_pat"); } catch { /* storage unavailable */ } };
+  const [token, setToken] = useState(""); // held in memory only, per the PRD's "not localStorage" rule
   const [pin, setPin] = useState("");
   const [link, setLink] = useState("");
   const [copied, setCopied] = useState(false);
   const [unlockPin, setUnlockPin] = useState("");
   const [error, setError] = useState("");
 
-  const hashParams = useMemo(() => new URLSearchParams(window.location.hash.replace(/^#/, "")), []);
-
-  useMemo(() => {
-    if (!hashParams.get("payload") || !hashParams.get("repo")) return;
-    const [parsedOwner, parsedRepo] = decodeURIComponent(hashParams.get("repo")!).split("/");
-    setOwner(parsedOwner || ""); setRepo(parsedRepo || ""); setBranch(hashParams.get("branch") || "main"); setMode("unlock");
-  }, [hashParams]);
+  useEffect(() => {
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    if (!hash.get("payload") || !hash.get("repo")) return;
+    const [parsedOwner, parsedRepo] = decodeURIComponent(hash.get("repo")!).split("/");
+    setOwner(parsedOwner || ""); setRepo(parsedRepo || ""); setBranch(hash.get("branch") || "main"); setMode("unlock");
+  }, []);
 
   const repoLabel = useMemo(() => owner && repo ? `${owner}/${repo}` : "your private repository", [owner, repo]);
 
@@ -61,7 +56,7 @@ function App() {
     const payload = await makePayload(token, pin);
     const value = `${window.location.origin}/#repo=${encodeURIComponent(`${owner}/${repo}`)}&branch=${encodeURIComponent(branch)}&payload=${encodeURIComponent(payload)}`;
     setLink(value);
-    persistToken(""); // don't keep the developer's token sitting around after the link is minted
+    setToken(""); // don't keep the developer's token after the link is minted
   };
 
   const applyRepoUrl = (value: string) => {
@@ -74,7 +69,7 @@ function App() {
 
   const unlock = async () => {
     try {
-      const payload = hashParams.get("payload"); if (!payload) throw new Error("Missing secure payload");
+      const payload = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("payload"); if (!payload) throw new Error("Missing secure payload");
       const [saltText, ivText, encryptedText] = payload.split(".");
       const fromBase64 = (value: string) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
       const salt = fromBase64(saltText), iv = fromBase64(ivText), encrypted = fromBase64(encryptedText);
@@ -100,7 +95,7 @@ function App() {
             <div className="eyebrow"><span className="pulse" /> BROWSER-NATIVE QA FOR GITHUB</div>
             <h1>Ship confidence.<br /><em>Not your source code.</em></h1>
             <p className="hero-copy">Turn any private GitHub repository into a secure, shareable QA environment. No deploys. No servers. No code leaving your browser.</p>
-            <div className="hero-actions"><button className="primary" onClick={() => setMode("setup")}>Create a QA link <ArrowRight size={17} /></button><button className="ghost" onClick={() => document.getElementById("how")?.scrollIntoView({ behavior: "smooth" })}><Play size={15} fill="currentColor" /> See how it works</button></div>
+            <div className="hero-actions"><button className="primary" onClick={() => setMode("setup")}>Create a QA link <ArrowRight size={17} /></button><button className="ghost" onClick={() => document.getElementById("how")?.scrollIntoView({ behavior: "smooth" })}><ArrowRight size={15} /> See how it works</button></div>
             <div className="trust-row"><span>Built for teams who care about</span><b><LockKeyhole size={13} /> privacy</b><b><Zap size={13} /> velocity</b><b><GitBranch size={13} /> GitHub</b></div>
           </section>
           <section className="preview-wrap container"><div className="preview-glow" /><div className="preview-card"><div className="window-bar"><div className="traffic"><i /><i /><i /></div><div className="address"><LockKeyhole size={12} /> edgeqa.local <span>/sandbox/{repoLabel}</span></div><div className="live"><span className="live-dot" /> LIVE</div></div><div className="preview-content"><aside><div className="side-logo"><span className="mini-mark">✦</span> edgeqa</div><div className="side-section">WORKSPACE</div><div className="side-item selected">◈ <span>Preview</span></div><div className="side-item">⌁ <span>Issues</span><small>3</small></div><div className="side-section">REPOSITORY</div><div className="side-item muted">⌘ <span>{repoLabel}</span></div><div className="side-item muted">⑂ <span>{branch}</span></div><div className="side-footer"><div className="avatar">JD</div><span>QA session<br /><small>Token in memory</small></span></div></aside><div className="mock-site"><div className="mock-nav"><b>Northstar</b><span>Changelog</span><span>Docs</span><span>Pricing</span><button>Get started ↗</button></div><div className="mock-hero"><div className="mock-kicker">THE OPERATING SYSTEM FOR MODERN TEAMS</div><h2>Make work<br /><strong>flow.</strong></h2><p>One calm space for your team's best thinking, building, and shipping.</p><button>Explore Northstar <ArrowRight size={13} /></button></div><div className="mock-stats"><span><b>42k</b> teams in motion</span><span><b>99.9%</b> less busywork</span></div></div></div><div className="bug-pill">🐞 Report a bug</div></div></section>
@@ -111,7 +106,7 @@ function App() {
         <footer className="footer container"><span>© 2024 edgeqa</span><span>Frontend-only. Privacy-first.</span><span>Made for the web <span className="accent">✦</span></span></footer>
       </>}
 
-      {mode === "setup" && <Setup owner={owner} setOwner={setOwner} repo={repo} setRepo={setRepo} branch={branch} setBranch={setBranch} repoUrl={repoUrl} applyRepoUrl={applyRepoUrl} token={token} setToken={persistToken} pin={pin} setPin={setPin} error={error} link={link} copied={copied} generate={generate} copyLink={copyLink} onBack={() => setMode("home")} onLaunch={() => setMode("viewer")} />}
+      {mode === "setup" && <Setup owner={owner} setOwner={setOwner} repo={repo} setRepo={setRepo} branch={branch} setBranch={setBranch} repoUrl={repoUrl} applyRepoUrl={applyRepoUrl} token={token} setToken={setToken} pin={pin} setPin={setPin} error={error} link={link} copied={copied} generate={generate} copyLink={copyLink} onBack={() => setMode("home")} onLaunch={() => setMode("viewer")} />}
       {mode === "unlock" && <main className="unlock container"><div className="unlock-card"><div className="empty-icon"><LockKeyhole size={25} /></div><div className="eyebrow"><span className="pulse" /> PRIVATE QA SESSION</div><h1>Enter the <em>session PIN.</em></h1><p>Unlock the browser-only preview for <b>{repoLabel}</b>. The repository token will never be saved.</p><input autoFocus type="password" value={unlockPin} onChange={(e) => setUnlockPin(e.target.value)} onKeyDown={(e) => e.key === "Enter" && unlock()} placeholder="Session PIN" />{error && <div className="error">{error}</div>}<button className="primary full" onClick={unlock}>Unlock preview <ArrowRight size={17} /></button><button className="back" onClick={() => { window.location.hash = ""; setMode("home"); }}>← Create your own session</button></div></main>}
     </div>
   );
@@ -120,7 +115,7 @@ function App() {
 function Setup(props: any) {
   const [patOpen, setPatOpen] = useState(false);
   const target = props.owner && props.repo ? `${props.owner}/${props.repo}#${props.branch}` : "owner/repo#main";
-  return <main className="setup container"><button className="back" onClick={props.onBack}>← Back to home</button><div className="setup-grid"><div className="setup-intro"><div className="eyebrow"><span className="pulse" /> NEW QA SESSION</div><h1>Bring your repo.<br /><em>Leave the deploy.</em></h1><p>Paste a GitHub repository URL, pick your branch, and mint a PIN-protected QA link — all in your browser.</p><div className="setup-note"><ShieldCheck size={18} /><span><b>Your token is ephemeral</b><small>Held in browser memory (per-tab) and not sent to any server.</small></span></div></div><div className="form-card"><div className="form-title"><span className="step-badge">01</span><span><b>Connect repository</b><small>Fine-grained token required</small></span></div><label>Repository URL<div className="input-icon"><Link2 size={15} /><input value={props.repoUrl} onChange={(e: any) => props.applyRepoUrl(e.target.value)} placeholder="https://github.com/acme/site or acme/site" /></div><small className="hint">Paste a full GitHub URL (owner & repo are pulled out), or fill the fields below. Supports <code>/tree/BRANCH</code>.</small></label><div className="two-col"><label>Repository owner<input value={props.owner} onChange={(e: any) => props.setOwner(e.target.value)} placeholder="e.g. acme-studio" /></label><label>Repository name<input value={props.repo} onChange={(e: any) => props.setRepo(e.target.value)} placeholder="e.g. marketing-site" /></label></div><div className="two-col"><label>Branch<input value={props.branch} onChange={(e: any) => props.setBranch(e.target.value)} /></label><label>Preset<select><option>Static site</option><option>React (experimental)</option></select></label></div><div className="target-chip"><Link2 size={13} /> <span>{target}</span></div><div className="pat-box"><div className="pat-head" onClick={() => setPatOpen(!patOpen)}><KeyRound size={15} /><span><b>Need a fine-grained token?</b><small>Steps to create one</small></span><ChevronDown size={15} className={patOpen ? "spin" : ""} /></div>{patOpen && <ol className="pat-steps"><li>Go to <a href="https://github.com/settings/personal-access-tokens/new?scopes=" target="_blank" rel="noreferrer">github.com/settings/tokens</a> → <b>Generate new token</b>.</li><li>Choose <b>Fine-grained tokens</b>.</li><li>Under <b>Repository access</b>, pick the repo(s) you want to preview.</li><li>Under <b>Permissions</b> set <b>Contents → Read-only</b> and <b>Issues → Read and write</b>.</li><li>Generate, then paste the <code>github_pat_…</code> token into the field below.</li><li>Reuse it across sessions in this tab, or remove it after the link is minted — it stays in your browser.</li></ol>}</div><label>GitHub fine-grained token<div className="input-icon"><KeyRound size={15} /><input type="password" value={props.token} onChange={(e: any) => props.setToken(e.target.value)} placeholder="github_pat_••••••••••" /></div><small className="hint">Needs <b>Contents: Read</b> to serve files and <b>Issues: Write</b> to accept bug reports.</small></label><div className="form-title second"><span className="step-badge">02</span><span><b>Protect your link</b><small>Share the PIN separately</small></span></div><label>Session PIN<div className="input-icon"><LockKeyhole size={15} /><input type="password" value={props.pin} onChange={(e: any) => props.setPin(e.target.value)} placeholder="At least 6 characters" /></div></label>{props.error && <div className="error">{props.error}</div>}<button className="primary full" onClick={props.generate}>Generate magic link <ArrowRight size={17} /></button>{props.link && <div className="link-result"><small>YOUR SECURE QA LINK</small><div><span>{props.link.slice(0, 42)}…</span><button onClick={props.copyLink}>{props.copied ? <Check size={16} /> : <Clipboard size={16} />}</button></div><button className="launch" onClick={props.onLaunch}>Open preview <ArrowRight size={14} /></button></div>}</div></div></main>;
+  return <main className="setup container"><button className="back" onClick={props.onBack}>← Back to home</button><div className="setup-grid"><div className="setup-intro"><div className="eyebrow"><span className="pulse" /> NEW QA SESSION</div><h1>Bring your repo.<br /><em>Leave the deploy.</em></h1><p>Paste a GitHub repository URL, pick your branch, and mint a PIN-protected QA link — all in your browser.</p><div className="setup-note"><ShieldCheck size={18} /><span><b>Your token is ephemeral</b><small>Held in browser memory (per-tab) and not sent to any server.</small></span></div></div><div className="form-card"><div className="form-title"><span className="step-badge">01</span><span><b>Connect repository</b><small>Fine-grained token required</small></span></div><label>Repository URL<div className="input-icon"><Link2 size={15} /><input value={props.repoUrl} onChange={(e: any) => props.applyRepoUrl(e.target.value)} placeholder="https://github.com/acme/site or acme/site" /></div><small className="hint">Paste a full GitHub URL (owner & repo are pulled out), or fill the fields below. Supports <code>/tree/BRANCH</code>.</small></label><div className="two-col"><label>Repository owner<input value={props.owner} onChange={(e: any) => props.setOwner(e.target.value)} placeholder="e.g. acme-studio" /></label><label>Repository name<input value={props.repo} onChange={(e: any) => props.setRepo(e.target.value)} placeholder="e.g. marketing-site" /></label></div><label>Branch<input value={props.branch} onChange={(e: any) => props.setBranch(e.target.value)} /></label><div className="target-chip"><Link2 size={13} /> <span>{target}</span></div><div className="pat-box"><div className="pat-head" onClick={() => setPatOpen(!patOpen)}><KeyRound size={15} /><span><b>Need a fine-grained token?</b><small>Steps to create one</small></span><ChevronDown size={15} className={patOpen ? "spin" : ""} /></div>{patOpen && <ol className="pat-steps"><li>Go to <a href="https://github.com/settings/personal-access-tokens/new?scopes=" target="_blank" rel="noreferrer">github.com/settings/tokens</a> → <b>Generate new token</b>.</li><li>Choose <b>Fine-grained tokens</b>.</li><li>Under <b>Repository access</b>, pick the repo(s) you want to preview.</li><li>Under <b>Permissions</b> set <b>Contents → Read-only</b> and <b>Issues → Read and write</b>.</li><li>Generate, then paste the <code>github_pat_…</code> token into the field below.</li><li>Reuse it across sessions in this tab, or remove it after the link is minted — it stays in your browser.</li></ol>}</div><label>GitHub fine-grained token<div className="input-icon"><KeyRound size={15} /><input type="password" value={props.token} onChange={(e: any) => props.setToken(e.target.value)} placeholder="github_pat_••••••••••" /></div><small className="hint">Needs <b>Contents: Read</b> to serve files and <b>Issues: Write</b> to accept bug reports.</small></label><div className="form-title second"><span className="step-badge">02</span><span><b>Protect your link</b><small>Share the PIN separately</small></span></div><label>Session PIN<div className="input-icon"><LockKeyhole size={15} /><input type="password" value={props.pin} onChange={(e: any) => props.setPin(e.target.value)} placeholder="At least 6 characters" /></div></label>{props.error && <div className="error">{props.error}</div>}<button className="primary full" onClick={props.generate}>Generate magic link <ArrowRight size={17} /></button>{props.link && <div className="link-result"><small>YOUR SECURE QA LINK</small><div><span>{props.link.slice(0, 42)}…</span><button onClick={props.copyLink}>{props.copied ? <Check size={16} /> : <Clipboard size={16} />}</button></div><button className="launch" onClick={props.onLaunch}>Open preview <ArrowRight size={14} /></button></div>}</div></div></main>;
 }
 
 function Viewer({ repo, branch, onExit }: { repo: string; branch: string; onExit: () => void }) {
