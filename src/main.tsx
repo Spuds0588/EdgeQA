@@ -113,15 +113,20 @@ function Viewer({ repo, branch, onExit }: { repo: string; branch: string; onExit
   const [showReport, setShowReport] = useState(false);
   const [reportSent, setReportSent] = useState(false);
   const [owner, repoName] = repo.split("/");
-  const sandboxUrl = `/sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/index.html`;
+  const base = (import.meta.env.BASE_URL || "/").replace(/^[\.\/]/, "/");
+  const baseRoot = base.endsWith("/") ? base : base + "/";
+  const sandboxUrl = `${baseRoot}sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/index.html`;
   useMemo(() => {
     if (!("serviceWorker" in navigator)) return;
-    navigator.serviceWorker.register("/edgeqa-sw.js").then(() => navigator.serviceWorker.ready).then((registration) => {
+    console.log("[edgeqa] registering service worker at", `${baseRoot}edgeqa-sw.js`);
+    navigator.serviceWorker.register(`${baseRoot}edgeqa-sw.js`).then(() => navigator.serviceWorker.ready).then((registration) => {
       registration.active?.postMessage({ type: "SET_TOKEN", scope: `${repo}/${branch}`, token: "session-token" });
     });
-    const handler = (event: MessageEvent) => event.data?.type === "EDGEQA_WARNING" && setWarning(event.data.message);
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type === "EDGEQA_WARNING") { console.warn("[edgeqa]", event.data.message); setWarning(event.data.message); }
+    };
     navigator.serviceWorker.addEventListener("message", handler); return () => navigator.serviceWorker.removeEventListener("message", handler);
-  }, [repo, branch]);
+  }, [repo, branch, baseRoot]);
   return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Sparkles size={16} /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setShowReport(true)}>🐞 Report a bug</button></div></div><div className="viewer-body"><iframe title="EdgeQA repository sandbox" src={sandboxUrl} /><div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Sandbox ready</h2><p>Connect a repository to load <b>{repo}</b> on the <b>{branch}</b> branch.</p><button className="primary" onClick={onExit}>Configure repository <ArrowRight size={16} /></button><small>Service Worker VFS · Token held in memory</small></div></div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}{showReport && <div className="modal-backdrop"><div className="report-card"><button className="close" onClick={() => setShowReport(false)}>×</button><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2><input placeholder="Short title" /><textarea placeholder="What happened?" rows={5} /><button className="primary full" onClick={() => { setReportSent(true); setShowReport(false); }}>Create GitHub issue <ArrowRight size={16} /></button>{reportSent && <small className="success">Issue queued with session context.</small>}</div></div>}</div>;
 }
 

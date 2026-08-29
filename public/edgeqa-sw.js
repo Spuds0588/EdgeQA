@@ -1,16 +1,27 @@
 const CACHE_NAME = "edgeqa-vfs-v1";
 const tokenByScope = new Map();
+const VFS_TAG = "[edgeqa-sw]";
+const log = (...args) => console.log(VFS_TAG, ...args);
+const scopePath = (self.registration && self.registration.scope ? new URL(self.registration.scope).pathname : "/").replace(/\/$/, "") || "/";
+log("service worker starting, scope", scopePath);
 const mime = { html: "text/html", css: "text/css", js: "application/javascript", mjs: "application/javascript", json: "application/json", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", txt: "text/plain", map: "application/json" };
 
-self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener("install", () => { log("install: skipping wait"); self.skipWaiting(); });
+self.addEventListener("activate", (event) => { log("activate: claiming clients"); event.waitUntil(self.clients.claim()); });
 self.addEventListener("message", (event) => {
-  if (event.data?.type === "SET_TOKEN" && event.data.scope && event.data.token) tokenByScope.set(event.data.scope, event.data.token);
-  if (event.data?.type === "CLEAR_CACHE") event.waitUntil(caches.delete(CACHE_NAME));
+  const { type, scope } = event.data || {};
+  log("message", type, scope || "");
+  if (type === "SET_TOKEN" && scope && event.data.token && !tokenByScope.has(scope)) {
+    tokenByScope.set(scope, event.data.token); log("session unlocked for", scope);
+  }
+  if (type === "CLEAR_CACHE") { log("clearing cache"); event.waitUntil(caches.delete(CACHE_NAME)); }
 });
 
 function parseVirtual(url) {
-  const match = new URL(url).pathname.match(/^\/sandbox\/([^/]+)\/([^/]+)\/([^/]+)\/(.*)$/);
+  let path = new URL(url).pathname;
+  if (scopePath !== "/" && path.startsWith(scopePath + "/")) path = path.slice(scopePath.length);
+  if (!path.startsWith("/")) path = "/" + path;
+  const match = path.match(/^\/sandbox\/([^/]+)\/([^/]+)\/([^/]+)\/(.*)$/);
   return match && { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]), branch: decodeURIComponent(match[3]), path: match[4] || "index.html" };
 }
 function contentType(path) { return mime[path.split(".").pop()?.toLowerCase()] || "application/octet-stream"; }
@@ -19,10 +30,11 @@ function scopeOf(info) { return `${info.owner}/${info.repo}/${info.branch}`; }
 async function githubFile(info, token) {
   const headers = { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` };
   const endpoint = `https://api.github.com/repos/${encodeURIComponent(info.owner)}/${encodeURIComponent(info.repo)}/contents/${info.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(info.branch)}`;
+  log("fetch contents", info.path, ">", endpoint);
   const response = await fetch(endpoint, { headers });
-  if (!response.ok) return null;
+  if (!response.ok) { log("contents miss", info.path, response.status); return null; }
   const item = await response.json();
-  if (item.type !== "file") return null;
+  if (item.type !== "file") { log("not a file", info.path, item.type); return null; }
   if (item.size > 100 * 1024 * 1024) {
     const warning = { type: "EDGEQA_WARNING", message: `${info.path} is over 100MB and was replaced with a safe placeholder.` };
     const clients = await self.clients.matchAll(); clients.forEach((client) => client.postMessage(warning));
@@ -30,23 +42,26 @@ async function githubFile(info, token) {
     return new Response("", { headers: { "Content-Type": contentType(info.path) } });
   }
   let body;
-  if (item.content) body = decodeBase64(item.content);
+  if (item.content) { log("decoded base64", info.path, item.size, "bytes"); body = decodeBase64(item.content); }
   else if (item.sha) {
+    log("blob fallback", info.path, item.sha);
     const blobResponse = await fetch(`https://api.github.com/repos/${info.owner}/${info.repo}/git/blobs/${item.sha}`, { headers });
-    if (!blobResponse.ok) return null;
+    if (!blobResponse.ok) { log("blob miss", info.path, blobResponse.status); return null; }
     const blob = await blobResponse.json(); body = blob.encoding === "base64" ? decodeBase64(blob.content) : new TextEncoder().encode(blob.content);
   }
   return body ? new Response(body, { headers: { "Content-Type": contentType(info.path), "Cache-Control": "no-store" } }) : null;
 }
 self.addEventListener("fetch", (event) => {
   const info = parseVirtual(event.request.url); if (!info) return;
+  log("intercept", info.owner + "/" + info.repo + "/" + info.branch + "/" + info.path);
   event.respondWith((async () => {
-    const cache = await caches.open(CACHE_NAME); const cached = await cache.match(event.request); if (cached) return cached;
-    const token = tokenByScope.get(scopeOf(info)); if (!token) return new Response("EdgeQA session is locked", { status: 401 });
+    const cache = await caches.open(CACHE_NAME); const cached = await cache.match(event.request); if (cached) { log("cache hit", info.path); return cached; }
+    const token = tokenByScope.get(scopeOf(info)); if (!token) { log("locked, no token for", scopeOf(info)); return new Response("EdgeQA session is locked", { status: 401 }); }
     let response = await githubFile(info, token);
-    if (!response && info.path !== "index.html") response = await githubFile({ ...info, path: "index.html" }, token);
-    if (!response) return new Response("File not found", { status: 404 });
-    if (response.status === 200) await cache.put(event.request, response.clone());
+    if (!response && info.path !== "index.html") { log("spa fallback", info.path); response = await githubFile({ ...info, path: "index.html" }, token); }
+    if (!response) { log("404", info.path); return new Response("File not found", { status: 404 }); }
+    if (response.status === 200) { await cache.put(event.request, response.clone()); log("cached", info.path); }
     return response;
   })());
 });
+log("service worker ready");
