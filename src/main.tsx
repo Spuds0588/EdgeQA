@@ -1,6 +1,6 @@
 import { createElement, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowRight, Check, ChevronDown, Clipboard, GitBranch, KeyRound, Link2, LockKeyhole, Menu, ShieldCheck, Sparkles, X, Zap } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, Clipboard, GitBranch, KeyRound, Link2, LockKeyhole, Menu, ShieldCheck, X, Zap } from "lucide-react";
 import "./index.css";
 import "./demo-element";
 import { parseRepoInput } from "./lib/repo";
@@ -19,6 +19,18 @@ async function deriveKey(pin: string, salt: BufferSource) {
 }
 
 function bytesToBase64(bytes: Uint8Array) { return btoa(String.fromCharCode(...bytes)); }
+
+function Logo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4.6 7.4 2 12l2.6 4.6" />
+      <path d="M19.4 7.4 22 12l-2.6 4.6" />
+      <path d="M8.5 2.6h7" />
+      <path d="M10 2.6v7.4a2 2 0 0 1-.2.9L4.7 20.4a1 1 0 0 0 .9 1.5h12.8a1 1 0 0 0 .9-1.5l-5.1-9.5a2 2 0 0 1-.2-.9V2.6" />
+      <path d="M8 16.4h8" />
+    </svg>
+  );
+}
 
 async function makePayload(token: string, pin: string) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -86,7 +98,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="nav container">
-        <button className="brand" onClick={() => setMode("home")}><span className="brand-mark"><Sparkles size={16} /></span><span>edge<span className="accent">qa</span></span></button>
+        <button className="brand" onClick={() => setMode("home")}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button>
         <button className="menu-button" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X /> : <Menu />}</button>
         <nav className={menuOpen ? "nav-links open" : "nav-links"}><a href="#how">How it works</a><a href="#security">Security</a><button className="nav-cta" onClick={() => setMode("setup")}>Open workspace <ArrowRight size={15} /></button></nav>
       </header>
@@ -127,7 +139,7 @@ function Viewer({ repo, branch, onExit }: { repo: string; branch: string; onExit
   const [reportOpen, setReportOpen] = useState(false);
   const [reportSent, setReportSent] = useState(false);
   const [owner, repoName] = repo.split("/");
-  const base = (import.meta.env.BASE_URL || "/").replace(/^[\.\/]/, "/");
+  const base = import.meta.env.BASE_URL || "/";
   const baseRoot = base.endsWith("/") ? base : base + "/";
   const sandboxUrl = `${baseRoot}sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/index.html`;
   useEffect(() => {
@@ -141,7 +153,7 @@ function Viewer({ repo, branch, onExit }: { repo: string; branch: string; onExit
     };
     navigator.serviceWorker.addEventListener("message", handler); return () => navigator.serviceWorker.removeEventListener("message", handler);
   }, [repo, branch, baseRoot]);
-  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Sparkles size={16} /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}>🐞 Report a bug</button></div></div><div className="viewer-body"><iframe title="EdgeQA repository sandbox" src={sandboxUrl} /><div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Sandbox ready</h2><p>Connect a repository to load <b>{repo}</b> on the <b>{branch}</b> branch.</p><button className="primary" onClick={onExit}>Configure repository <ArrowRight size={16} /></button><small>Service Worker VFS · Token held in memory</small></div></div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}>🐞<span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div><label>Short title<input placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea placeholder="Describe the bug and what you expected instead…" rows={6} /></label><button className="primary full" onClick={() => { setReportSent(true); setReportOpen(false); }}>Create GitHub issue <ArrowRight size={16} /></button>{reportSent && <small className="success">Issue queued with session context.</small>}<p className="report-context">Filed against <b>{repo}</b> · current path, viewport, and UA attached automatically.</p></aside></div>;
+  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}>🐞 Report a bug</button></div></div><div className="viewer-body"><iframe title="EdgeQA repository sandbox" src={sandboxUrl} /><div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Sandbox ready</h2><p>Connect a repository to load <b>{repo}</b> on the <b>{branch}</b> branch.</p><button className="primary" onClick={onExit}>Configure repository <ArrowRight size={16} /></button><small>Service Worker VFS · Token held in memory</small></div></div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}>🐞<span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div><label>Short title<input placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea placeholder="Describe the bug and what you expected instead…" rows={6} /></label><button className="primary full" onClick={() => { setReportSent(true); setReportOpen(false); }}>Create GitHub issue <ArrowRight size={16} /></button>{reportSent && <small className="success">Issue queued with session context.</small>}<p className="report-context">Filed against <b>{repo}</b> · current path, viewport, and UA attached automatically.</p></aside></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
