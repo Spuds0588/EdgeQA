@@ -8,7 +8,7 @@
 // Kept as a web component with a <slot name="media"> so you can swap in a real
 // video/GIF later without touching the rest of the app.
 
-const CYCLE = 17000; // one full animation loop, ms
+const CYCLE = 24000; // one full animation loop, ms (slowed so viewers can follow each step)
 const TITLE = "New task fails with 500";
 const BODY = "Clicking 'New task' shows the error banner and the task never appears. Reproducible every time.";
 const TITLE2 = "New task 500 on mobile";
@@ -16,15 +16,15 @@ const BODY2 = "Same failure on the phone — error banner shows, task never crea
 const EASE = (p) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
 // cursor movement segments: [start, end, target selector]
 const SEG = [
-  { a: 600, b: 1300, el: "#send" },
-  { a: 4200, b: 4900, el: "#pill" },
-  { a: 5400, b: 6100, el: "#dTitle" },
-  { a: 7000, b: 7700, el: "#dBody" },
-  { a: 8600, b: 9000, el: "#dSubmit" },
-  { a: 10800, b: 11500, el: "#p3Pill" },
-  { a: 11800, b: 12500, el: "#p3Title" },
-  { a: 13400, b: 14100, el: "#p3Body" },
-  { a: 15000, b: 15400, el: "#p3Submit" },
+  { a: 1600, b: 2000, el: "#send" },
+  { a: 6800, b: 7300, el: "#pill" },
+  { a: 8000, b: 8600, el: "#dTitle" },
+  { a: 9900, b: 10500, el: "#dBody" },
+  { a: 12100, b: 12400, el: "#dSubmit" },
+  { a: 15200, b: 15600, el: "#p3Pill" },
+  { a: 16200, b: 16800, el: "#p3Title" },
+  { a: 18300, b: 18900, el: "#p3Body" },
+  { a: 20500, b: 20700, el: "#p3Submit" },
 ];
 
 const CSS = `
@@ -135,7 +135,7 @@ const CSS = `
 .drawer input, .drawer textarea { display:block; width:100%; margin-top:5px; background:#0a1218; border:1px solid #27343d; border-radius:4px; color:#e8efed; font:inherit; font-size:10.5px; padding:8px 9px; outline:none; transition:border-color .2s; }
 .drawer input.act, .drawer textarea.act { border-color:var(--qa-acid); box-shadow:0 0 0 1px rgba(201,243,107,.35); }
 .drawer textarea { resize:none; height:66px; }
-.dSubmit { margin-top:auto; background:var(--qa-acid); color:#1b2a10; font:800 10.5px system-ui,sans-serif; padding:10px 12px; border-radius:4px; transition:transform .15s; }
+.dSubmit { margin-top:12px; background:var(--qa-acid); color:#1b2a10; font:800 10.5px system-ui,sans-serif; padding:10px 12px; border-radius:4px; transition:transform .15s; }
 .dSubmit.pop { transform:scale(1.05); }
 .dctx { font-size:8px; color:#5f6e74; line-height:1.5; margin-top:7px; }
 .toast { position:absolute; right:16px; bottom:74px; background:#182416; border:1px solid #3d5231; color:#d9e6d5; font-size:10px; padding:11px 14px; border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.4); display:flex; gap:9px; align-items:flex-start; max-width:240px; transform:translateX(calc(100% + 20px)); transition:transform .35s ease; }
@@ -174,6 +174,7 @@ const CSS = `
 .psheet input, .psheet textarea { display:block; width:100%; margin-top:3px; background:#0a1218; border:1px solid #27343d; border-radius:4px; color:#e8efed; font:inherit; font-size:8px; padding:6px 7px; outline:none; }
 .psheet input.act, .psheet textarea.act { border-color:var(--qa-acid); }
 .psheet textarea { height:44px; resize:none; }
+.psheet .pctx { font-size:6px; color:#5f6e74; line-height:1.5; margin-top:6px; }
 .psubmit { margin-top:9px; width:100%; background:var(--qa-acid); color:#1b2a10; font:800 8.5px system-ui,sans-serif; padding:8px; border-radius:5px; transition:transform .15s; }
 .psubmit.pop { transform:scale(1.05); }
 .ptoast { position:absolute; left:10px; right:10px; bottom:52px; background:#182416; border:1px solid #3d5231; color:#d9e6d5; font-size:7.5px; padding:8px 10px; border-radius:6px; opacity:0; transform:translateY(8px); transition:opacity .35s ease, transform .35s ease; z-index:5; }
@@ -193,7 +194,7 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
     <div class="chrome"><div class="lights"><i></i><i></i><i></i></div><div class="addr">◆&nbsp; edgeqa.local <span id="addr">/sandbox/…</span></div><div class="live"><i></i>&nbsp;LIVE</div></div>
     <div class="body">
       <aside class="rail"><div class="logo"><span class="lmark">${LOGO}</span> edgeqa</div><div class="sect">WORKSPACE</div>
-        <div class="item on">◈ Preview</div><div class="item">⌁ Issues <small id="issues">3</small></div>
+        <div class="item on">◈ Preview</div>
         <div class="sect">REPOSITORY</div><div class="item dim"><span id="repoName">acme/marketing-site</span></div><div class="item dim"><span id="branchName">main</span></div>
         <div class="foot"><div class="ava">JD</div><span><b>QA session</b><small>Token in memory</small></span></div>
       </aside>
@@ -201,7 +202,7 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
         <div class="sitebar"><b>✦ Northstar</b><span class="ws">Acme Studio / <b>Website Redesign</b></span><button class="invite">＋ Invite</button><button class="newtask">＋ New task</button></div>
         <div class="workspace"><div class="snap" id="snap"></div><div class="errbanner" id="eBanner">⚠ Task creation failed — <b>server 500</b></div>
           <div class="wrow">
-            <div class="mnav"><div class="sect">WORKSPACE</div><div class="mitem on">◐ Board</div><div class="mitem">➤ Chat</div><div class="mitem">◈ Reports</div><div class="sect">TEAM</div><div class="mitem"><span class="mava">JD</span>Jade</div><div class="mitem"><span class="mava">AB</span>Alex</div></div>
+            <div class="mnav"><div class="sect">WORKSPACE</div><div class="mitem on">◐ Board</div><div class="mitem">➤ Chat</div><div class="sect">TEAM</div><div class="mitem"><span class="mava">JD</span>Jade</div><div class="mitem"><span class="mava">AB</span>Alex</div></div>
             <div class="board">
               <div class="col"><h4>To do <i>3</i></h4><div class="card"><span class="who">AB</span><b>Write pricing copy</b><small>Due Fri</small><span class="tag">Copy</span></div><div class="card"><span class="who">SP</span><b>Collect testimonials</b><small>Needs 3 more</small></div></div>
               <div class="col"><h4>In progress <i>2</i></h4><div class="card"><span class="who">JD</span><b>Build hero section</b><small>60% · blocked</small><span class="tag">Design</span></div><div class="card"><span class="who">AB</span><b>Checkout flow impl</b><small>In review</small></div></div>
@@ -224,8 +225,8 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
       <div class="drawer-head"><div><b>Report a bug</b><small id="dRepo">acme/marketing-site · main</small></div><span>×</span></div>
       <label>Short title<input id="dTitle" placeholder="e.g. Broken nav on mobile" autocomplete="off"></label>
       <label>What happened?<textarea id="dBody" placeholder="Describe the bug and what you expected instead…"></textarea></label>
+      <small class="dctx">Auto-attached: repo · branch · page · screensize<br>device/browser · time · console log</small>
       <button class="dSubmit" id="dSubmit">Create GitHub issue →</button>
-      <small class="dctx">Current path · viewport · UA attached automatically</small>
     </aside>
     <div class="toast" id="toast"><div><b>✓ Bug filed to GitHub Issues</b><small id="toastMsg">acme/marketing-site · issue opened</small></div></div>
   </div>
@@ -258,6 +259,7 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
           <div class="psheet-head"><b>Report a bug</b><span>×</span></div>
           <label>Short title<input id="p3Title" placeholder="e.g. Checkout broken" autocomplete="off"></label>
           <label>What happened?<textarea id="p3Body" placeholder="Describe the bug…"></textarea></label>
+          <small class="pctx">Auto-attached: repo · page · screensize · device · time</small>
           <button class="psubmit" id="p3Submit">Create issue →</button>
         </aside>
         <div class="ptoast" id="p3Toast"><b>✓ Bug filed to GitHub Issues</b><small>path · viewport · UA attached</small></div>
@@ -334,9 +336,9 @@ export default class EdgeQaDemo extends HTMLElement {
       const stage = $(".stage");
 
       // scenes: 1 = share link, 2 = desktop QA, 3 = mobile QA
-      const s1 = t < 3600;
-      const s2 = t >= 4200 && t < 10100;
-      const s3 = t >= 10800 && t < 16400;
+      const s1 = t < 5200;
+      const s2 = t >= 6000 && t < 13600;
+      const s3 = t >= 14800 && t < 21600;
       $("#chat").classList.toggle("on", s1);
       $("#desk").classList.toggle("on", s2);
       $("#phone").classList.toggle("on", s3);
@@ -344,35 +346,34 @@ export default class EdgeQaDemo extends HTMLElement {
       $("#legend").textContent = s1 ? "● QA LINK + PIN SHARED" : s2 ? "● LIVE SANDBOX · desktop" : s3 ? "● MOBILE QA · 390px viewport" : "● edgeqa";
 
       // scene 1: share link + PIN
-      $("#msgLink").classList.toggle("on", t >= 1500);
-      $("#msgReply").classList.toggle("on", t >= 2300);
-      $("#send").classList.toggle("pop", t >= 1300 && t < 1500);
+      $("#msgLink").classList.toggle("on", t >= 2100);
+      $("#msgReply").classList.toggle("on", t >= 3300);
+      $("#send").classList.toggle("pop", t >= 1800 && t < 2100);
 
       // scene 2: desktop QA
-      $("#pill").classList.toggle("hot", t >= 4900 && t < 5200);
-      $("#pill").classList.toggle("pop", t >= 5200 && t < 5400);
-      $("#drawer").classList.toggle("open", t >= 5200 && t < 9200);
-      $("#dSubmit").classList.toggle("pop", t >= 9000 && t < 9200);
-      $("#snap").style.borderColor = t >= 5200 && t < 9800 ? "rgba(201,243,107,.4)" : "transparent";
-      $("#eBanner").classList.toggle("on", t >= 4700 && t < 9200);
-      if (t >= 6100 && t < 7000) type($("#dTitle"), TITLE, 6100, 7000);
-      if (t >= 7700 && t < 8600) type($("#dBody"), BODY, 7700, 8600);
-      if (t < 5200) { $("#dTitle").value = ""; $("#dBody").value = ""; }
-      $("#dTitle").classList.toggle("act", t >= 6100 && t < 7000);
-      $("#dBody").classList.toggle("act", t >= 7700 && t < 8600);
-      $("#toast").classList.toggle("on", t >= 9400 && t < 10100);
-      $("#issues").textContent = t >= 9400 && t < 10100 ? "4" : "3";
+      $("#pill").classList.toggle("hot", t >= 6900 && t < 7300);
+      $("#pill").classList.toggle("pop", t >= 7400 && t < 7600);
+      $("#drawer").classList.toggle("open", t >= 7400 && t < 12800);
+      $("#dSubmit").classList.toggle("pop", t >= 12400 && t < 12600);
+      $("#snap").style.borderColor = t >= 7400 && t < 13200 ? "rgba(201,243,107,.4)" : "transparent";
+      $("#eBanner").classList.toggle("on", t >= 6500 && t < 12800);
+      if (t >= 8600 && t < 9900) type($("#dTitle"), TITLE, 8600, 9900);
+      if (t >= 10500 && t < 12000) type($("#dBody"), BODY, 10500, 12000);
+      if (t < 7400) { $("#dTitle").value = ""; $("#dBody").value = ""; }
+      $("#dTitle").classList.toggle("act", t >= 8600 && t < 9900);
+      $("#dBody").classList.toggle("act", t >= 10500 && t < 12000);
+      $("#toast").classList.toggle("on", t >= 13000 && t < 13600);
 
       // scene 3: mobile QA
-      $("#p3Pill").classList.toggle("pop", t >= 11500 && t < 11800);
-      $("#p3Sheet").classList.toggle("open", t >= 11500 && t < 15600);
-      $("#p3Submit").classList.toggle("pop", t >= 15400 && t < 15600);
-      if (t >= 12500 && t < 13400) type($("#p3Title"), TITLE2, 12500, 13400);
-      if (t >= 14100 && t < 15000) type($("#p3Body"), BODY2, 14100, 15000);
-      if (t < 11500) { $("#p3Title").value = ""; $("#p3Body").value = ""; }
-      $("#p3Title").classList.toggle("act", t >= 12500 && t < 13400);
-      $("#p3Body").classList.toggle("act", t >= 14100 && t < 15000);
-      $("#p3Toast").classList.toggle("on", t >= 15600 && t < 16400);
+      $("#p3Pill").classList.toggle("pop", t >= 15600 && t < 16000);
+      $("#p3Sheet").classList.toggle("open", t >= 15600 && t < 21100);
+      $("#p3Submit").classList.toggle("pop", t >= 20700 && t < 20900);
+      if (t >= 16800 && t < 18400) type($("#p3Title"), TITLE2, 16800, 18400);
+      if (t >= 18900 && t < 20500) type($("#p3Body"), BODY2, 18900, 20500);
+      if (t < 15600) { $("#p3Title").value = ""; $("#p3Body").value = ""; }
+      $("#p3Title").classList.toggle("act", t >= 16800 && t < 18400);
+      $("#p3Body").classList.toggle("act", t >= 18900 && t < 20500);
+      $("#p3Toast").classList.toggle("on", t >= 21200 && t < 21600);
 
       // cursor: follow the movement segments, eased, in unscaled stage coords
       const seg = SEG.find((s) => t >= s.a && t < s.b);
@@ -387,7 +388,7 @@ export default class EdgeQaDemo extends HTMLElement {
         this.#pos = { x: this.#from.x + (to.x - this.#from.x) * p, y: this.#from.y + (to.y - this.#from.y) * p };
       } else if (this.#seg) { this.#from = this.#pos; this.#seg = null; }
       cursor.style.transform = `translate(${this.#pos.x}px, ${this.#pos.y}px) translate(-50%, -50%)`;
-      cursor.classList.toggle("on", (t >= 600 && t < 3600) || (t >= 4200 && t < 10100) || (t >= 10800 && t < 16000));
+      cursor.classList.toggle("on", (t >= 800 && t < 5200) || (t >= 6000 && t < 13600) || (t >= 14800 && t < 21000));
 
       void cursor.offsetWidth; // keep transitions/rAF flowing even when headless
       this.#frame = requestAnimationFrame(tick);
