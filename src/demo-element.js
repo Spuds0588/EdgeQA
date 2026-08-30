@@ -1,28 +1,38 @@
 // edgeqa-demo — an animated QA-environment demo for the EdgeQA landing page.
-// Shows the actual thing you use: a sandboxed preview of a repo, with a tester
-// opening the in-context report drawer, filling it out, and filing the issue
-// back to GitHub. Rendered on a fixed 960x540 stage that is scaled to fit the
-// host width (transform: scale), so it scales cleanly on every viewport.
+// Tells the full story in three scenes on a fixed 960x540 stage that scales to
+// the host width (transform: scale):
+//   1. The dev shares the QA link + PIN with the tester in a chat message.
+//   2. The tester runs the desktop preview, spots a bug, fills the report
+//      drawer, and files it back to GitHub.
+//   3. The same flow on a phone (mobile QA) with a bottom-sheet report.
 // Kept as a web component with a <slot name="media"> so you can swap in a real
 // video/GIF later without touching the rest of the app.
 
-const CYCLE = 10400; // one full animation loop, ms
+const CYCLE = 17000; // one full animation loop, ms
 const TITLE = "Broken nav on mobile";
 const BODY = "Nav links overlap and the CTA is cut off at mobile widths.";
+const TITLE2 = "Checkout button unresponsive";
+const BODY2 = "Tapping Checkout does nothing at 390px viewport.";
 const EASE = (p) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
 // cursor movement segments: [start, end, target selector]
 const SEG = [
-  { a: 1400, b: 2300, el: "#pill" },
-  { a: 2800, b: 3500, el: "#dTitle" },
-  { a: 4500, b: 5200, el: "#dBody" },
-  { a: 6300, b: 6800, el: "#dSubmit" },
+  { a: 600, b: 1300, el: "#send" },
+  { a: 4200, b: 4900, el: "#pill" },
+  { a: 5400, b: 6100, el: "#dTitle" },
+  { a: 7000, b: 7700, el: "#dBody" },
+  { a: 8600, b: 9000, el: "#dSubmit" },
+  { a: 10800, b: 11500, el: "#p3Pill" },
+  { a: 11800, b: 12500, el: "#p3Title" },
+  { a: 13400, b: 14100, el: "#p3Body" },
+  { a: 15000, b: 15400, el: "#p3Submit" },
 ];
 
 const CSS = `
 :host { display:block; width:100%; height:540px; overflow:hidden; --qa-acid:#c9f36b; --qa-line:#223038; --qa-dim:#5b6a70; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color:#edf2f1; }
 * { box-sizing:border-box; }
 .stage { position:relative; width:960px; height:540px; transform-origin:top left; }
-.win { position:absolute; inset:0; border:1px solid var(--qa-line); border-radius:10px; overflow:hidden; background:#0e171d; display:flex; flex-direction:column; }
+.win { position:absolute; inset:0; border:1px solid var(--qa-line); border-radius:10px; overflow:hidden; background:#0e171d; display:flex; flex-direction:column; transition:filter .5s ease; }
+.win.dim { filter:brightness(.5); }
 .chrome { height:36px; flex:none; display:flex; align-items:center; gap:14px; padding:0 14px; border-bottom:1px solid var(--qa-line); background:#0a1116; }
 .lights { display:flex; gap:6px; }
 .lights i { width:8px; height:8px; border-radius:50%; background:#3a4650; }
@@ -59,12 +69,36 @@ const CSS = `
 .stats { display:flex; gap:38px; border-top:1px solid #d5d8cd; margin:0 10%; padding-top:13px; color:#84918e; font-size:8px; }
 .stats b { font-size:14px; color:#203337; display:block; }
 .snap { position:absolute; inset:0; border:2px solid rgba(201,243,107,0); pointer-events:none; transition:border-color .3s; }
-.legend { position:absolute; left:16px; top:12px; font:600 8px ui-monospace,'DM Mono',monospace; letter-spacing:.14em; color:var(--qa-dim); z-index:3; }
-/* QA chrome overlays */
-.pill { position:absolute; right:16px; bottom:16px; display:flex; align-items:center; gap:8px; background:#132a2e; color:var(--qa-acid); font-size:10px; font-weight:600; padding:10px 14px; border-radius:5px; box-shadow:0 6px 20px rgba(0,0,0,.35); transition:transform .2s, box-shadow .2s; z-index:3; }
+.legend { position:absolute; left:16px; top:12px; font:600 8px ui-monospace,'DM Mono',monospace; letter-spacing:.14em; color:var(--qa-dim); z-index:6; }
+/* scene wrappers */
+.desk, .chat, .phone { position:absolute; inset:0; opacity:0; transition:opacity .5s ease; z-index:3; pointer-events:none; }
+.desk.on, .chat.on, .phone.on { opacity:1; }
+/* scene 1: chat share of the QA link + PIN */
+.chat { display:grid; place-items:center; z-index:4; }
+.chat-card { width:370px; background:#0e171d; border:1px solid #2a3941; border-radius:12px; box-shadow:0 24px 60px rgba(0,0,0,.5); overflow:hidden; }
+.chat-head { display:flex; align-items:center; gap:9px; padding:11px 14px; border-bottom:1px solid var(--qa-line); }
+.chat-ava { width:26px; height:26px; border-radius:50%; display:grid; place-items:center; background:var(--qa-acid); color:#1b2a10; font-size:9px; font-weight:800; }
+.chat-head b { font-size:11px; display:block; }
+.chat-head small { font-size:8.5px; color:#6c7b81; }
+.chat-live { margin-left:auto; color:var(--qa-acid); font-size:9px; }
+.chat-body { padding:12px 14px; display:flex; flex-direction:column; gap:9px; min-height:136px; }
+.msg { max-width:84%; padding:8px 10px; border-radius:8px; font-size:9.5px; line-height:1.5; }
+.msg.me { align-self:flex-end; background:#1c2b20; border:1px solid #31442f; color:#dce8d8; opacity:0; transform:translateY(6px); transition:opacity .4s ease, transform .4s ease; }
+.msg.me.on { opacity:1; transform:none; }
+.msg.me b { color:var(--qa-acid); font-size:9px; display:block; margin-bottom:4px; }
+.msg.them { align-self:flex-start; background:#141c22; border:1px solid #24323a; color:#c3cfd2; opacity:0; transform:translateY(6px); transition:opacity .4s ease, transform .4s ease; }
+.msg.them.on { opacity:1; transform:none; }
+.link-chip, .pin-chip { display:flex; align-items:center; gap:6px; font:600 9px ui-monospace,'DM Mono',monospace; color:#bfd4cf; background:#0a1218; border:1px solid #2b3a42; border-radius:5px; padding:6px 8px; margin-top:4px; }
+.pin-chip b { color:var(--qa-acid); }
+.chat-input { display:flex; align-items:center; gap:8px; padding:9px 12px; border-top:1px solid var(--qa-line); }
+.chat-input span { flex:1; font-size:9.5px; color:#5f6e74; }
+.send { background:var(--qa-acid); color:#1b2a10; font:800 9.5px system-ui,sans-serif; padding:7px 12px; border-radius:4px; transition:transform .15s; }
+.send.pop { transform:scale(1.12); }
+/* scene 2: desktop QA overlays */
+.pill { position:absolute; right:16px; bottom:16px; display:flex; align-items:center; gap:8px; background:#132a2e; color:var(--qa-acid); font-size:10px; font-weight:600; padding:10px 14px; border-radius:5px; box-shadow:0 6px 20px rgba(0,0,0,.35); transition:transform .2s, box-shadow .2s; }
 .pill.hot { transform:translateY(-2px); box-shadow:0 10px 26px rgba(201,243,107,.25); }
 .pill.pop { transform:scale(1.12); }
-.drawer { position:absolute; top:10px; right:10px; bottom:10px; width:300px; z-index:5; background:#0f181e; border:1px solid #2a3941; border-radius:8px; padding:16px 16px 14px; display:flex; flex-direction:column; transform:translateX(calc(100% + 24px)); transition:transform .32s ease; box-shadow:-14px 0 40px rgba(0,0,0,.35); }
+.drawer { position:absolute; top:10px; right:10px; bottom:10px; width:300px; background:#0f181e; border:1px solid #2a3941; border-radius:8px; padding:16px 16px 14px; display:flex; flex-direction:column; transform:translateX(calc(100% + 24px)); transition:transform .32s ease; box-shadow:-14px 0 40px rgba(0,0,0,.35); }
 .drawer.open { transform:translateX(0); }
 .drawer-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px; }
 .drawer-head b { font-size:12.5px; color:#e4ecea; display:block; letter-spacing:-.02em; }
@@ -77,16 +111,48 @@ const CSS = `
 .dSubmit { margin-top:auto; background:var(--qa-acid); color:#1b2a10; font:800 10.5px system-ui,sans-serif; padding:10px 12px; border-radius:4px; transition:transform .15s; }
 .dSubmit.pop { transform:scale(1.05); }
 .dctx { font-size:8px; color:#5f6e74; line-height:1.5; margin-top:7px; }
-.cursor { position:absolute; width:26px; height:26px; z-index:6; opacity:0; pointer-events:none; }
-.cursor svg { width:100%; height:100%; opacity:.95; }
-.cursor.on { opacity:1; }
-.toast { position:absolute; right:16px; bottom:74px; z-index:6; background:#182416; border:1px solid #3d5231; color:#d9e6d5; font-size:10px; padding:11px 14px; border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.4); display:flex; gap:9px; align-items:flex-start; max-width:240px; transform:translateX(calc(100% + 20px)); transition:transform .35s ease; }
+.toast { position:absolute; right:16px; bottom:74px; background:#182416; border:1px solid #3d5231; color:#d9e6d5; font-size:10px; padding:11px 14px; border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.4); display:flex; gap:9px; align-items:flex-start; max-width:240px; transform:translateX(calc(100% + 20px)); transition:transform .35s ease; }
 .toast.on { transform:translateX(0); }
 .toast b { color:var(--qa-acid); display:block; font-size:10px; margin-bottom:2px; }
 .toast small { color:#9fb0a4; font-size:9px; line-height:1.5; display:block; }
+/* scene 3: mobile QA */
+.phone { display:grid; place-items:center; z-index:4; }
+.pbody { position:relative; width:206px; height:392px; background:#0a1116; border:2px solid #2a3941; border-radius:28px; padding:8px; box-shadow:0 30px 70px rgba(0,0,0,.55); }
+.pstatus { display:flex; justify-content:space-between; align-items:center; height:16px; font:700 7px ui-monospace,'DM Mono',monospace; color:#93a1a5; padding:0 6px; }
+.psite { position:relative; height:calc(100% - 16px); background:#f2f1e9; color:#152228; border-radius:18px; overflow:hidden; display:flex; flex-direction:column; }
+.pnav { height:30px; flex:none; display:flex; align-items:center; gap:8px; padding:0 12px; font-size:8px; color:#526066; }
+.pnav b { font-size:11px; color:#18292c; margin-right:auto; letter-spacing:-.06em; }
+.plive { display:flex; align-items:center; gap:4px; font:600 6px ui-monospace,'DM Mono',monospace; color:#3f8f2f; }
+.plive i { width:5px; height:5px; border-radius:50%; background:#7ad05a; animation:beat 1.6s infinite; }
+.pher { padding:20px 16px 0; position:relative; flex:1; }
+.pher .kicker { font:500 5.5px ui-monospace,'DM Mono',monospace; letter-spacing:.1em; color:#778785; }
+.pher h2 { font-size:22px; line-height:.95; letter-spacing:-.08em; margin:8px 0; color:#1b3338; }
+.pher h2 strong { color:#e87352; }
+.pher p { font-size:6.5px; color:#68777a; line-height:1.5; max-width:150px; }
+.pher button { margin-top:10px; background:#c9f36b; color:#23312b; padding:7px 10px; font:800 7px system-ui,sans-serif; border-radius:4px; }
+.ppill { position:absolute; right:10px; bottom:10px; background:#132a2e; color:var(--qa-acid); font-size:7.5px; font-weight:600; padding:7px 9px; border-radius:5px; box-shadow:0 5px 14px rgba(0,0,0,.3); transition:transform .15s; z-index:3; }
+.ppill.pop { transform:scale(1.12); }
+.psheet { position:absolute; left:6px; right:6px; bottom:6px; background:#0f181e; border:1px solid #2a3941; border-radius:12px; padding:10px; transform:translateY(115%); transition:transform .3s ease; z-index:4; }
+.psheet.open { transform:translateY(0); }
+.psheet-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; }
+.psheet-head b { font-size:9.5px; color:#e4ecea; }
+.psheet-head span { color:#6c7b81; font-size:11px; }
+.psheet label { display:block; font-size:6.5px; color:#93a1a5; margin-top:7px; }
+.psheet input, .psheet textarea { display:block; width:100%; margin-top:3px; background:#0a1218; border:1px solid #27343d; border-radius:4px; color:#e8efed; font:inherit; font-size:8px; padding:6px 7px; outline:none; }
+.psheet input.act, .psheet textarea.act { border-color:var(--qa-acid); }
+.psheet textarea { height:44px; resize:none; }
+.psubmit { margin-top:9px; width:100%; background:var(--qa-acid); color:#1b2a10; font:800 8.5px system-ui,sans-serif; padding:8px; border-radius:5px; transition:transform .15s; }
+.psubmit.pop { transform:scale(1.05); }
+.ptoast { position:absolute; left:10px; right:10px; bottom:52px; background:#182416; border:1px solid #3d5231; color:#d9e6d5; font-size:7.5px; padding:8px 10px; border-radius:6px; opacity:0; transform:translateY(8px); transition:opacity .35s ease, transform .35s ease; z-index:5; }
+.ptoast.on { opacity:1; transform:none; }
+.ptoast b { color:var(--qa-acid); display:block; font-size:8px; margin-bottom:1px; }
+.ptoast small { color:#9fb0a4; font-size:7px; }
+.cursor { position:absolute; width:26px; height:26px; z-index:7; opacity:0; pointer-events:none; }
+.cursor svg { width:100%; height:100%; opacity:.95; }
+.cursor.on { opacity:1; }
 `;
 
-const LOGO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.6 7.4 2 12l2.6 4.6"/><path d="M19.4 7.4 22 12l-2.6 4.6"/><path d="M8.5 2.6h7"/><path d="M10 2.6v7.4a2 2 0 0 1-.2.9L4.7 20.4a1 1 0 0 0 .9 1.5h12.8a1 1 0 0 0 .9-1.5l-5.1-9.5a2 2 0 0 1-.2-.9V2.6"/><path d="M8 16.4h8"/></svg>';
+const LOGO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.6 7.6 2 12l1.6 4.4"/><path d="M20.4 7.6l1.6 4.4-1.6 4.4"/><path d="M10 2.8h4"/><path d="M10.8 2.8v6.9a1.8 1.8 0 0 1-.18.83L5.9 19.7a1 1 0 0 0 .9 1.5h10.4a1 1 0 0 0 .9-1.5l-4.72-9.17a1.8 1.8 0 0 1-.18-.83V2.8"/><path d="M7.3 16.2h9.4"/></svg>';
 
 const template = document.createElement("template");
 template.innerHTML = `<style>${CSS}</style><div class="stage">
@@ -105,18 +171,51 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
       </div>
     </div>
   </div>
-  <span class="legend">● LIVE SANDBOX · recording</span>
+
+  <div class="desk" id="desk">
+    <div class="pill" id="pill">🐞 <span>Report a bug</span></div>
+    <aside class="drawer" id="drawer">
+      <div class="drawer-head"><div><b>Report a bug</b><small id="dRepo">acme/marketing-site · main</small></div><span>×</span></div>
+      <label>Short title<input id="dTitle" placeholder="e.g. Broken nav on mobile" autocomplete="off"></label>
+      <label>What happened?<textarea id="dBody" placeholder="Describe the bug and what you expected instead…"></textarea></label>
+      <button class="dSubmit" id="dSubmit">Create GitHub issue →</button>
+      <small class="dctx">Current path · viewport · UA attached automatically</small>
+    </aside>
+    <div class="toast" id="toast"><div><b>✓ Bug filed to GitHub Issues</b><small id="toastMsg">acme/marketing-site · issue opened</small></div></div>
+  </div>
+
+  <div class="chat" id="chat">
+    <div class="chat-card">
+      <div class="chat-head"><div class="chat-ava">JD</div><div><b>QA channel</b><small>JD → Sam · just now</small></div><span class="chat-live">●</span></div>
+      <div class="chat-body">
+        <div class="msg me" id="msgLink"><b>QA link ready 🔗</b>Here's your secure preview — enter the PIN to unlock it.<div class="link-chip">🔗&nbsp; edgeqa.local<span id="chatRepo">/sandbox/acme/marketing-site</span></div><div class="pin-chip">🔑 PIN:&nbsp;<b>4521</b></div></div>
+        <div class="msg them" id="msgReply">Got it — testing now 👍</div>
+      </div>
+      <div class="chat-input"><span>Send QA link + PIN…</span><button class="send" id="send">Send →</button></div>
+    </div>
+  </div>
+
+  <div class="phone" id="phone">
+    <div class="pbody">
+      <div class="pstatus"><span>9:41</span><span>◉ ▮ ▯▯ ▯▯</span></div>
+      <div class="psite">
+        <div class="pnav"><b>Northstar</b><span class="plive"><i></i>LIVE</span></div>
+        <div class="pher"><span class="kicker">THE OPERATING SYSTEM FOR MODERN TEAMS</span><h2>Make work <strong>flow.</strong></h2><p>One calm space for your team's best thinking, building, and shipping.</p><button>Explore →</button></div>
+        <div class="ppill" id="p3Pill">🐞 Report</div>
+        <aside class="psheet" id="p3Sheet">
+          <div class="psheet-head"><b>Report a bug</b><span>×</span></div>
+          <label>Short title<input id="p3Title" placeholder="e.g. Checkout broken" autocomplete="off"></label>
+          <label>What happened?<textarea id="p3Body" placeholder="Describe the bug…"></textarea></label>
+          <button class="psubmit" id="p3Submit">Create issue →</button>
+        </aside>
+        <div class="ptoast" id="p3Toast"><b>✓ Bug filed to GitHub Issues</b><small>path · viewport · UA attached</small></div>
+      </div>
+    </div>
+  </div>
+
+  <span class="legend" id="legend">● QA LINK + PIN SHARED</span>
   <slot name="media"></slot>
-  <div class="pill" id="pill">🐞 <span>Report a bug</span></div>
-  <aside class="drawer" id="drawer">
-    <div class="drawer-head"><div><b>Report a bug</b><small id="dRepo">acme/marketing-site · main</small></div><span>×</span></div>
-    <label>Short title<input id="dTitle" placeholder="e.g. Broken nav on mobile" autocomplete="off"></label>
-    <label>What happened?<textarea id="dBody" placeholder="Describe the bug and what you expected instead…"></textarea></label>
-    <button class="dSubmit" id="dSubmit">Create GitHub issue →</button>
-    <small class="dctx">Current path · viewport · UA attached automatically</small>
-  </aside>
   <div class="cursor" id="cursor"><svg viewBox="0 0 24 24" fill="none" stroke="#cff36b" stroke-width="2"><path d="M5 3l5 14 2.5-5.5L18 9z"/></svg></div>
-  <div class="toast" id="toast"><div><b>✓ Bug filed to GitHub Issues</b><small id="toastMsg">acme/marketing-site · issue opened</small></div></div>
 </div>`;
 
 export default class EdgeQaDemo extends HTMLElement {
@@ -163,21 +262,64 @@ export default class EdgeQaDemo extends HTMLElement {
     this.shadowRoot.querySelector("#branchName").textContent = branch;
     this.shadowRoot.querySelector("#dRepo").textContent = `${owner}/${repo} · ${branch}`;
     this.shadowRoot.querySelector("#toastMsg").textContent = `${owner}/${repo} · issue opened`;
+    this.shadowRoot.querySelector("#chatRepo").textContent = `/sandbox/${owner}/${repo}`;
   }
 
   #frame = 0;
   #ts = 0;
   #seg = null;
-  #from = { x: 920, y: 500 };
-  #pos = { x: 920, y: 500 };
+  #from = { x: 950, y: 520 };
+  #pos = { x: 950, y: 520 };
 
   play() {
     const $ = (s) => this.shadowRoot.querySelector(s);
+    const type = (el, txt, a, b) => { el.value = txt.slice(0, Math.max(0, Math.min(txt.length, Math.floor(((t - a) / (b - a)) * txt.length)))); };
+    let t = 0;
     const tick = (now) => {
       if (!this.#ts) this.#ts = now;
-      const t = (now - this.#ts) % CYCLE;
+      t = (now - this.#ts) % CYCLE;
       const cursor = $("#cursor");
       const stage = $(".stage");
+
+      // scenes: 1 = share link, 2 = desktop QA, 3 = mobile QA
+      const s1 = t < 3600;
+      const s2 = t >= 4200 && t < 10100;
+      const s3 = t >= 10800 && t < 16400;
+      $("#chat").classList.toggle("on", s1);
+      $("#desk").classList.toggle("on", s2);
+      $("#phone").classList.toggle("on", s3);
+      $(".win").classList.toggle("dim", s1 || s3);
+      $("#legend").textContent = s1 ? "● QA LINK + PIN SHARED" : s2 ? "● LIVE SANDBOX · desktop" : s3 ? "● MOBILE QA · 390px viewport" : "● edgeqa";
+
+      // scene 1: share link + PIN
+      $("#msgLink").classList.toggle("on", t >= 1500);
+      $("#msgReply").classList.toggle("on", t >= 2300);
+      $("#send").classList.toggle("pop", t >= 1300 && t < 1500);
+
+      // scene 2: desktop QA
+      $("#pill").classList.toggle("hot", t >= 4900 && t < 5200);
+      $("#pill").classList.toggle("pop", t >= 5200 && t < 5400);
+      $("#drawer").classList.toggle("open", t >= 5200 && t < 9200);
+      $("#dSubmit").classList.toggle("pop", t >= 9000 && t < 9200);
+      $("#snap").style.borderColor = t >= 5200 && t < 9800 ? "rgba(201,243,107,.4)" : "transparent";
+      if (t >= 6100 && t < 7000) type($("#dTitle"), TITLE, 6100, 7000);
+      if (t >= 7700 && t < 8600) type($("#dBody"), BODY, 7700, 8600);
+      if (t < 5200) { $("#dTitle").value = ""; $("#dBody").value = ""; }
+      $("#dTitle").classList.toggle("act", t >= 6100 && t < 7000);
+      $("#dBody").classList.toggle("act", t >= 7700 && t < 8600);
+      $("#toast").classList.toggle("on", t >= 9400 && t < 10100);
+      $("#issues").textContent = t >= 9400 && t < 10100 ? "4" : "3";
+
+      // scene 3: mobile QA
+      $("#p3Pill").classList.toggle("pop", t >= 11500 && t < 11800);
+      $("#p3Sheet").classList.toggle("open", t >= 11500 && t < 15600);
+      $("#p3Submit").classList.toggle("pop", t >= 15400 && t < 15600);
+      if (t >= 12500 && t < 13400) type($("#p3Title"), TITLE2, 12500, 13400);
+      if (t >= 14100 && t < 15000) type($("#p3Body"), BODY2, 14100, 15000);
+      if (t < 11500) { $("#p3Title").value = ""; $("#p3Body").value = ""; }
+      $("#p3Title").classList.toggle("act", t >= 12500 && t < 13400);
+      $("#p3Body").classList.toggle("act", t >= 14100 && t < 15000);
+      $("#p3Toast").classList.toggle("on", t >= 15600 && t < 16400);
 
       // cursor: follow the movement segments, eased, in unscaled stage coords
       const seg = SEG.find((s) => t >= s.a && t < s.b);
@@ -192,28 +334,7 @@ export default class EdgeQaDemo extends HTMLElement {
         this.#pos = { x: this.#from.x + (to.x - this.#from.x) * p, y: this.#from.y + (to.y - this.#from.y) * p };
       } else if (this.#seg) { this.#from = this.#pos; this.#seg = null; }
       cursor.style.transform = `translate(${this.#pos.x}px, ${this.#pos.y}px) translate(-50%, -50%)`;
-      cursor.classList.toggle("on", t >= 1400 && t < 9600);
-
-      // drawer lifecycle
-      $("#drawer").classList.toggle("open", t >= 2600 && t < 7100);
-      $("#pill").classList.toggle("hot", t >= 2300 && t < 2600);
-      $("#pill").classList.toggle("pop", t >= 2600 && t < 2800);
-      $("#dSubmit").classList.toggle("pop", t >= 6800 && t < 7000);
-      $("#snap").style.borderColor = t >= 2600 && t < 9500 ? "rgba(201,243,107,.4)" : "transparent";
-
-      // typing into the form
-      const titleEl = $("#dTitle");
-      const bodyEl = $("#dBody");
-      const type = (el, txt, a, b) => { el.value = txt.slice(0, Math.max(0, Math.min(txt.length, Math.floor(((t - a) / (b - a)) * txt.length)))); };
-      if (t >= 3500 && t < 4500) type(titleEl, TITLE, 3500, 4500);
-      if (t >= 5200 && t < 6300) type(bodyEl, BODY, 5200, 6300);
-      if (t < 2600) { titleEl.value = ""; bodyEl.value = ""; }
-      titleEl.classList.toggle("act", t >= 3500 && t < 4500);
-      bodyEl.classList.toggle("act", t >= 5200 && t < 6300);
-
-      // result: issue filed
-      $("#toast").classList.toggle("on", t >= 7300 && t < 9600);
-      $("#issues").textContent = t >= 7300 && t < 9600 ? "4" : "3";
+      cursor.classList.toggle("on", (t >= 600 && t < 3600) || (t >= 4200 && t < 10100) || (t >= 10800 && t < 16000));
 
       void cursor.offsetWidth; // keep transitions/rAF flowing even when headless
       this.#frame = requestAnimationFrame(tick);
@@ -223,8 +344,8 @@ export default class EdgeQaDemo extends HTMLElement {
 
   stop() {
     cancelAnimationFrame(this.#frame);
-    this.shadowRoot.querySelector("#toast").classList.remove("on");
-    this.shadowRoot.querySelector("#drawer").classList.remove("open");
+    const s = this.shadowRoot;
+    ["#toast", "#drawer", "#chat", "#desk", "#phone", "#msgLink", "#msgReply", "#p3Toast", "#p3Sheet"].forEach((sel) => s.querySelector(sel)?.classList.remove("on", "open"));
   }
 }
 

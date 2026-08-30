@@ -22,12 +22,12 @@ function bytesToBase64(bytes: Uint8Array) { return btoa(String.fromCharCode(...b
 
 function Logo({ size = 16 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4.6 7.4 2 12l2.6 4.6" />
-      <path d="M19.4 7.4 22 12l-2.6 4.6" />
-      <path d="M8.5 2.6h7" />
-      <path d="M10 2.6v7.4a2 2 0 0 1-.2.9L4.7 20.4a1 1 0 0 0 .9 1.5h12.8a1 1 0 0 0 .9-1.5l-5.1-9.5a2 2 0 0 1-.2-.9V2.6" />
-      <path d="M8 16.4h8" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3.6 7.6 2 12l1.6 4.4" />
+      <path d="M20.4 7.6l1.6 4.4-1.6 4.4" />
+      <path d="M10 2.8h4" />
+      <path d="M10.8 2.8v6.9a1.8 1.8 0 0 1-.18.83L5.9 19.7a1 1 0 0 0 .9 1.5h10.4a1 1 0 0 0 .9-1.5l-4.72-9.17a1.8 1.8 0 0 1-.18-.83V2.8" />
+      <path d="M7.3 16.2h9.4" />
     </svg>
   );
 }
