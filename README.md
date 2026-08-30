@@ -35,6 +35,8 @@ Staging environments are a pain. Deploying every branch to a preview host is slo
 | **Read-only share links** | Append `&readonly=1` to any session URL to hide the EdgeQA header and bug-reporting UI — a pure preview for sharing with stakeholders. |
 | **Paste-a-repo URL** | Drop in `https://github.com/acme/site` (or `acme/site`, or a `/tree/` branch URL) and the form fills itself. |
 | **Bookmarklet** | One-click pre-fill from any GitHub repo page. |
+| **Saved QA links** | After generating a link, EdgeQA asks if you want to save it — stored PIN-encrypted in `localStorage` (never the token, never the PIN), with per-link copy / open / delete. Manage many sessions at once. |
+| **Encrypted backups** | Export all saved links as a JSON backup and re-import them on any browser — the payloads stay PIN-locked, so the backup is safe to move around. |
 | **Mobile QA** | The full preview + report flow works on phones. |
 
 ## How it works
@@ -101,6 +103,7 @@ The project deploys to GitHub Pages automatically on every push to `main` via `.
    - Scope it to the repository you're previewing.
 4. Paste the token and choose a **session PIN** (≥ 6 chars).
 5. Generate the magic link, copy it, and send it to your tester **along with the PIN separately** (the PIN is the only key to the token).
+6. EdgeQA then asks **"Save this QA link?"** — saving keeps the PIN-encrypted link in this browser (under **Your QA links** below the form) so you can reopen it later with its PIN. Saving is always explicit, never automatic. Use **Export backup** / **Import backup** to move your saved links between browsers; each entry has copy, open, and delete, plus **Clear all saved links**.
 
 **As the tester:**
 
@@ -134,7 +137,7 @@ tests/edgeqa.spec.ts     Playwright e2e specs
 
 ## Current status & roadmap
 
-Working today: link generation/decryption, the VFS service worker (with the real decrypted token handed off securely), repo-URL parsing, bookmarklet, the full landing experience, the in-context report drawer (desktop + mobile), **real GitHub issue creation** — reports are `POST`ed to the repo's Issues API with an `edgeqa-report` label; the drawer transparently shows the auto-attached session context (repo, branch, page, screensize, device/browser, time) and can include the session's **console log** (optional, on by default), with a link to the filed issue on success — and a **tokenless live demo** (`/#demo`) that previews this repo's public `examples/northstar/` site so anyone can try the platform without a repo or PAT.
+Working today: link generation/decryption, the VFS service worker (with the real decrypted token handed off securely), repo-URL parsing, bookmarklet, the full landing experience, the in-context report drawer (desktop + mobile), **real GitHub issue creation** — reports are `POST`ed to the repo's Issues API with an `edgeqa-report` label; the drawer transparently shows the auto-attached session context (repo, branch, page, screensize, device/browser, time) and can include the session's **console log** (optional, on by default), with a link to the filed issue on success — **saved QA links** (opt-in per generation, PIN-encrypted in `localStorage`, with copy/open/delete and JSON **export/import backups**) — and a **tokenless live demo** (`/#demo`) that previews this repo's public `examples/northstar/` site so anyone can try the platform without a repo or PAT.
 
 Next up:
 
