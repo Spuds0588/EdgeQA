@@ -254,6 +254,20 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(await res.text()).toContain("https://esm.sh/redux");
   });
 
+  it("preset scope: a rewritten bare import is byte-exact (no offset leaked after the specifier)", async () => {
+    const sw = makeSW(htmlFetch(`import { createStore } from \"redux\";\nimport app from \"./app.js\";`));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "jsx" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/store.js");
+    const text = await res.text();
+    // Regression: the token capture must not swallow the closing quote and append JS's
+    // match-offset argument. The rewritten specifier is exactly `https://esm.sh/redux"`.
+    expect(text).toContain(`from \"https://esm.sh/redux\"`);
+    expect(text).not.toMatch(/redux\d/); // no stale JS match-offset int after the package
+    expect(text).toMatch(/redux"\;/);
+    // relative import untouched
+    expect(text).toContain(`from \"./app.js\"`);
+  });
+
   it("preset scope: committed build artifacts (dist) pass through untouched", async () => {
     const sw = makeSW(htmlFetch(`import { createStore } from \"redux\";`));
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "jsx" });

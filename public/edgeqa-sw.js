@@ -18,28 +18,27 @@ const scopePath = (self.registration && self.registration.scope ? new URL(self.r
 log("service worker starting, scope", scopePath);
 const mime = { html: "text/html", css: "text/css", scss: "text/css", sass: "text/css", less: "text/css", styl: "text/css", js: "application/javascript", mjs: "application/javascript", json: "application/json", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", txt: "text/plain", map: "application/json" };
 
-// --- Experimental in-browser build tier (react / preact / generic jsx+tsx) ---
-// Source repos (vite/react/etc.) are transpiled on the fly through @babel/standalone
-// (JSX/TSX) and every bare npm import is rewritten at serve time to the esm.sh CDN, so
-// ANY dependency a real app imports resolves in the browser — no hand-mapped allowlist.
-// esm.sh resolves versions/subpaths, bundles each package, and rewrites its own bare
-// imports, so heavy-dep source apps render instead of only the lean ones.
-// This is the "build" half of the kind:"build" resolver seam — no server, no bundler,
-// no token leaving the browser.
+// --- Experimental in-browser build tier (react / preact / jsx+tsx / vue / svelte) ---
+// Source repos are compiled and served entirely in the browser. JSX/TSX transpile through
+// @babel/standalone in the worker; every bare npm import is rewritten at serve time to the
+// esm.sh CDN, so ANY dependency a real app imports resolves — no hand-mapped allowlist.
+// Vue .vue and Svelte .svelte compiler SDKs are ESM, and import() is banned on
+// ServiceWorkerGlobalScope, so the worker delegates those to the controlling app page via
+// a postMessage round-trip (the page dynamic-imports them off esm.sh). No server, no
+// bundler, no token leaving the browser.
 const BABEL_URL = "https://unpkg.com/@babel/standalone@7.26.4/babel.min.js";
 const ESM_CDN = "https://esm.sh/";
 const presetByScope = new Map();
 
-// importScripts() is only legal in a service worker during install/evaluation, so
-// load @babel/standalone lazily on first transpile via fetch + indirect eval
-// (runs in the worker global scope, no CSP on this SW). Fails safe to raw bytes.
+// importScripts() is only legal in a service worker during install/evaluation, so load
+// @babel/standalone lazily on first transpile via fetch + indirect eval (runs in the worker
+// global scope, no CSP on this SW). Fails safe to raw bytes.
 async function postDebug(payload) {
   try {
     const clients = await self.clients.matchAll();
     clients.forEach((client) => client.postMessage({ type: "EDGEQA_DEBUG", ...payload }));
   } catch { /* best-effort */ }
 }
-
 async function ensureBabel() {
   if (self.Babel) { postDebug({ babel: "already", has: !!self.Babel }); return true; }
   try {
@@ -47,8 +46,6 @@ async function ensureBabel() {
     const res = await fetch(BABEL_URL);
     if (!res.ok) {
       log("babel fetch failed", res.status);
-      const clients = await self.clients.matchAll();
-      clients.forEach((client) => client.postMessage({ type: "EDGEQA_WARNING", message: "In-browser build unavailable (couldn't load the transpiler) — serving source files as-is." }));
       return false;
     }
     (0, eval)(await res.text());
@@ -57,8 +54,6 @@ async function ensureBabel() {
     return !!self.Babel;
   } catch (error) {
     log("babel unavailable", String(error));
-    const clients = await self.clients.matchAll();
-    clients.forEach((client) => client.postMessage({ type: "EDGEQA_WARNING", message: "The in-browser build engine couldn't load — serving this repo's source files as-is." }));
     return false;
   }
 }
@@ -68,7 +63,7 @@ async function ensureBabel() {
 // any dependency a real source app imports works here. Relative (./), absolute (/),
 // and URL (https:/data:...) specifiers are left untouched.
 function rewriteBareImports(js) {
-  return js.replace(/((?:from\s+|import\s*\(|(?:^|[;\n]\s*)import\s+|export\s+[^;]*?from\s+))(['"])([^'"]+)(\2)/g, (m, ctx, q, spec, endq) => {
+  return js.replace(/((?:from\s+|import\s*\(|(?:^|[\n]\s*)import\s+|export\s+[^;]*?from\s+))(["'])([^\s"']+)(\2)/g, (m, ctx, q, spec, endq) => {
     if (spec && !spec.startsWith(".") && !spec.startsWith("/") && !/^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) {
       return `${ctx}${q}${ESM_CDN}${spec}${endq}`;
     }
@@ -76,14 +71,12 @@ function rewriteBareImports(js) {
   });
 }
 
-// Transpile JSX/TSX and rewrite CSS imports into stylesheet-link injectors (vite
-// style `import "./App.css"`). Any remaining bare imports are rewritten to esm.sh
-// so the browser resolves them without an import map.
+// Transpile JSX/TSX and rewrite CSS imports into stylesheet-link injectors (vite style
+// `import "./App.css"`). Any remaining bare imports are rewritten to esm.sh so the browser
+// resolves them without an import map.
 function transpileModule(code, path, extraDir) {
   const isTs = /\.tsx?$/i.test(path);
   const presets = isTs ? [["react", { runtime: "automatic" }], "typescript"] : [["react", { runtime: "automatic" }]];
-  // decorators + class fields (e.g. mobx @observer / @observable) ship in babel-standalone
-  // and are common in real React/TS source — enable both loosely.
   const plugins = [["proposal-decorators", { legacy: true }], ["proposal-class-properties", { loose: true }]];
   const out = self.Babel.transform(code, { presets, plugins, filename: path, sourceMaps: false, comments: false });
   let js = out.code || "";
@@ -93,51 +86,88 @@ function transpileModule(code, path, extraDir) {
   // relative specifier with the directory offset (./y -> ./x/y, ../y -> ./y) so they
   // resolve against the module's true folder.
   if (extraDir) {
-    js = js.replace(/((?:from\s+|import\s*\(|import\s+|export\s+[^;]*?from\s+))(['"])((?:\.\.?\/)[^'"]*)/g, (m, ctx, q, rel) => `${ctx}${q}./${extraDir}/${rel}`);
+    js = js.replace(/((?:from\s+|import\s*\(|import\s+|export\s+[^;]*?from\s+))(["'])((?:\.\.?\/)[^"']*)/g, (m, ctx, q, rel) => `${ctx}${q}./${extraDir}/${rel}`);
   }
+  return postProcessJs(js);
+}
+
+// Shared per-module post-processing for the JSX/plain-JS tiers served directly by this
+// worker: Vite-style CSS imports become stylesheet-link injectors, image/asset imports
+// become URL strings, and any remaining bare npm imports are rewritten to esm.sh.
+// (Vue/Svelte output is post-processed on the page instead — see frame.ts.)
+function postProcessJs(js) {
   const cssUrls = [];
   js = js.replace(/(?:import\s+(?:[^'"]*?\s+from\s+)?)(['"])([^'"]+?\.(?:css|scss|sass|less|styl))\1/g, (m, q, url) => { cssUrls.push(url); return ""; });
-  // Vite-style asset imports (import img from './assets/x.png') become URL strings
-  // resolved against the module — the browser can't import binary files natively.
   js = js.replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+(['"])([^'"]+?\.(?:png|jpe?g|gif|webp|svg|ico|avif|bmp|mp4|webm|mp3|wav|ogg|woff2?|ttf|eot))\2/g, (m, name, q, url) => `const ${name} = new URL(${q}${url}${q}, import.meta.url).href;`);
   if (cssUrls.length) {
     const injector = cssUrls.map((u) => `(()=>{const l=document.createElement("link");l.rel="stylesheet";l.href=new URL(${JSON.stringify(u)},import.meta.url).href;document.head.appendChild(l);})();`).join("");
     js = injector + js;
   }
-  js = rewriteBareImports(js);
-  return js;
+  return rewriteBareImports(js);
 }
 
-// Rewrite app-root-absolute asset refs ("/src/main.tsx") to be relative to this
-// document's directory — vite dev HTML treats "/x" as relative to the folder holding
-// index.html, which is exactly what the sandbox entry document represents. Bare-import
-// resolution happens per-module (see rewriteBareImports), so no import map is needed.
-function transformHtml(html, path) {
+// ---- Vue/Svelte compile delegation to the app page ---------------------------------
+// The page owns the esm.sh compiler imports (Vue/Svelte are ESM and import() is disallowed
+// on ServiceWorkerGlobalScope). The worker posts an EDGEQA_COMPILE_REQUEST to its clients,
+// the app page compiles + post-processes, and replies with EDGEQA_COMPILE_RESPONSE which
+// resolves the pending fetch. Fails safe to the raw file if no page answers in time.
+const compileSeq = { n: 0 };
+const compilePending = new Map();
+function compileViaClient(preset, code, path) {
+  return new Promise((resolve) => {
+    const id = "c" + (++compileSeq.n);
+    const timeout = setTimeout(() => {
+      compilePending.delete(id);
+      log("compile round-trip timed out (no page answered)", path, preset);
+      resolve({ ok: false });
+    }, 15000);
+    compilePending.set(id, { path, resolve: (ok, out) => { clearTimeout(timeout); resolve(ok ? { ok: true, code: out } : { ok: false }); } });
+    self.clients.matchAll().then((clis) => clis.forEach((c) => c.postMessage({ type: "EDGEQA_COMPILE_REQUEST", id, preset, code, path })));
+  });
+}
+
+// Rewrite app-root-absolute asset refs ("/src/main.tsx") to be relative to this document's
+// directory — vite dev HTML treats "/x" as relative to the folder holding index.html, which
+// is exactly what the sandbox entry document represents. Bare-import resolution happens
+// per-module (see rewriteBareImports), so no import map is needed.
+function transformHtml(html) {
   return html.replace(/((?:src|href|poster)=[""])\/(?!\/)([^""]*)/g, (m, pre, p) => `${pre}${p}`);
 }
 
-// Returns a transformed Response, or null when no transform applies (or babel is
-// unavailable) so the caller serves the original bytes.
-async function applyPreset(res, info, extraDir) {
+// Returns a transformed Response, or null when no transform applies (or the compiler for the
+// active preset is unavailable) so the caller serves the original bytes.
+async function applyPreset(res, info, extraDir, preset) {
   try {
     const p = info.path;
     if (/\.html?$/i.test(p)) {
       const text = await res.text();
-      return new Response(transformHtml(text, p) + "<!--SW-DONE-->", { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+      return new Response(transformHtml(text) + "<!--SW-DONE-->", { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+    }
+    const jsResp = (marker, body) => new Response(marker + body, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
+    if (preset === "svelte" && /\.svelte$/i.test(p)) {
+      const text = await res.text();
+      const r = await compileViaClient("svelte", text, p);
+      return jsResp(r.ok ? "/*SW-SVELTE*/" : "/*SW-SVELTE-FAIL*/", r.ok ? r.code : text);
+    }
+    if (preset === "vue" && /\.vue$/i.test(p)) {
+      const text = await res.text();
+      const r = await compileViaClient("vue", text, p);
+      return jsResp(r.ok ? "/*SW-VUE*/" : "/*SW-VUE-FAIL*/", r.ok ? r.code : text);
     }
     if (/\.(jsx|tsx|ts)$/i.test(p)) {
       const text = await res.text();
-      if (!(await ensureBabel())) return new Response("/*SW-BABEL-FAIL*/" + text, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
-      return new Response("/*SW-TRANSPILED*/" + transpileModule(text, p, extraDir), { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
+      if (!(await ensureBabel())) return jsResp("/*SW-BABEL-FAIL*/", text);
+      return jsResp("/*SW-TRANSPILED*/", transpileModule(text, p, extraDir));
     }
-    // Plain ESM source (.js/.mjs) that isn't a build artifact: no JSX to transpile, but
-    // still rewrite bare imports so npm deps resolve. Skipped for build output folders so
-    // committed bundles pass through untouched.
+    // Plain ESM source (.js/.mjs) that isn't a build artifact: no JSX/SFC to transpile, but
+    // still run the shared post-processing (CSS/asset imports -> injectors/URLs, bare npm
+    // imports -> esm.sh) so depend-sparse entry files (Vue/Svelte main.js) load. Skipped for
+    // build output folders so committed bundles pass through untouched.
     if (/\.(js|mjs)$/i.test(p) && !/(^|\/)(dist|build|out|output|bundles|bundle)\/|(^|\/)(dist|bundle)[^/]*\.js/i.test(p)) {
       const text = await res.text();
-      return new Response("/*SW-REWRITTEN*/" + rewriteBareImports(text), { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
+      return jsResp("/*SW-REWRITTEN*/", postProcessJs(text));
     }
-  } catch (error) { log("preset transform failed", info.path, String(error)); }
+  } catch (error) { log("preset transform failed", info.path, preset, String(error)); }
   return null;
 }
 
@@ -159,6 +189,10 @@ self.addEventListener("message", (event) => {
   }
   if (type === "SET_PRESET" && scope && event.data.preset) {
     presetByScope.set(scope, event.data.preset); log("preset", event.data.preset, "for", scope);
+  }
+  if (type === "EDGEQA_COMPILE_RESPONSE") {
+    const pending = compilePending.get(event.data.id);
+    if (pending) { compilePending.delete(event.data.id); pending.resolve(!!event.data.ok, event.data.code); log("compile reply", pending.path, event.data.ok); }
   }
   if (type === "CLEAR_CACHE") { log("clearing cache"); event.waitUntil(caches.delete(CACHE_NAME)); }
 });
@@ -226,7 +260,7 @@ async function githubFileSafe(info, token) {
 // budget) for each candidate; returns the first real file, or null. This only runs
 // after a genuine miss and is gated to non-document requests, so SPA routing is
 // unaffected — a navigation to /pythagoras still gets the SPA/index.html fallback.
-const SOURCE_EXTS = ["js", "mjs", "jsx", "ts", "tsx"];
+const SOURCE_EXTS = ["js", "mjs", "jsx", "ts", "tsx", "svelte", "vue"];
 async function resolveModule(info, token) {
   const slash = info.path.lastIndexOf("/");
   const dir = slash >= 0 ? info.path.slice(0, slash) : "";
@@ -287,10 +321,10 @@ self.addEventListener("fetch", (event) => {
       if (dir) response = await githubFileSafe({ ...info, path: `${dir}/index.html` }, token);
       if (!response) response = await githubFileSafe({ ...info, path: "index.html" }, token);
     }
-    // Experimental build tier: when this scope carries a preset, transpile JSX/TSX
-    // and inject the import map + absolute-path rewrite into HTML before caching.
+    // Experimental build tier: when this scope carries a preset, transform the response
+    // (transpile JSX/TSX, compile Vue/Svelte, rewrite the HTML) before caching.
     if (preset && response && response.status === 200) {
-      const transformed = await applyPreset(response, info, extraDir);
+      const transformed = await applyPreset(response, info, extraDir, preset);
       if (transformed) { log("preset", preset, "applied to", info.path); response = transformed; }
     }
     if (response && response.status === 429) {

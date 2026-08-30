@@ -5,7 +5,7 @@
 // tier", and `preset` names the in-browser transpile mode when one applies.
 const GH = "https://api.github.com";
 
-export type Preset = "react" | "preact" | "jsx";
+export type Preset = "react" | "preact" | "jsx" | "vue" | "svelte";
 
 export interface Candidate {
   /** Value baked into &path= ("", "docs", "DualBoy/src", or "gui/root.html"). */
@@ -80,15 +80,21 @@ function looksLikeSource(tree: { path: string; type: string }[]): boolean {
 }
 
 // Framework detection from repo signals. Only presets the build tier can actually
-// run are returned (react / preact / generic jsx+tsx) — vue/svelte/angular
-// detection lands with their transpile rounds.
+// run are returned (react / preact / generic jsx+tsx / vue / svelte). Angular's AOT
+// compiler can't realistically run in a browser, so it stays out until a better seam.
 export function detectPreset(tree: { path: string; type: string }[], pkg: any): Preset | null {
   const paths = new Set((tree || []).map((n) => n.path || ""));
   const has = (re: RegExp) => [...paths].some((p) => re.test(p));
   const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
   if (deps["preact"]) return "preact";
   if (deps["react"] && deps["react-dom"]) return "react";
-  if (has(/^vite\.config\./) || has(/^src\/main\.(tsx|jsx)$/) || has(/\.(tsx|jsx)$/)) return "jsx";
+  if (deps["vue"]) return "vue";
+  if (deps["svelte"]) return "svelte";
+  // file-signal fallbacks (no usable package.json)
+  if (has(/^vite\.config\./)) return "jsx";
+  if (has(/\.svelte$/)) return "svelte";
+  if (has(/\.vue$/)) return "vue";
+  if (has(/^src\/main\.(tsx|jsx)$/) || has(/\.(tsx|jsx)$/)) return "jsx";
   return null;
 }
 

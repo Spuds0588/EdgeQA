@@ -61,9 +61,11 @@ describe("detectPreset (framework detection)", () => {
     expect(detectPreset(tree, null)).toBeNull();
   });
 
-  it("vue/svelte-only trees are not detected yet (their transpile rounds haven't landed)", () => {
-    const tree = [{ path: "src/App.vue", type: "blob" }];
-    expect(detectPreset(tree, { dependencies: { vue: "^3" } })).toBeNull();
+  it("detects Vue and Svelte source repos from deps + file signals", () => {
+    expect(detectPreset([{ path: "src/App.vue", type: "blob" }], { dependencies: { vue: "^3" } })).toBe("vue");
+    expect(detectPreset([{ path: "src/App.svelte", type: "blob" }], { dependencies: { svelte: "^5" } })).toBe("svelte");
+    expect(detectPreset([{ path: "src/App.vue", type: "blob" }], {})).toBe("vue");
+    expect(detectPreset([{ path: "src/App.svelte", type: "blob" }], {})).toBe("svelte");
   });
 });
 
