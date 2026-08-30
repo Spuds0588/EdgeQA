@@ -30,7 +30,7 @@ Staging environments are a pain. Deploying every branch to a preview host is slo
 | **Read-through cache** | Repo files are cached so reloads are instant and API rate limits are spared. |
 | **Large-asset fallback** | Handles GitHub's 1MB contents-API limit via the Git Database API (up to 100MB), and synthesizes safe placeholders for anything larger. |
 | **SPA fallback** | Virtual 404s fall back to `index.html`, so client-side routers work. |
-| **In-context bug reporting** | A report drawer (side panel on desktop, bottom sheet on mobile) collects title + description with path, viewport, and UA attached, then opens a real GitHub issue via the session token. |
+| **In-context bug reporting** | A report drawer (side panel on desktop, bottom sheet on mobile) collects title + description and shows exactly what will be auto-attached (repo, branch, page, screensize, device/browser, time) before you click submit. You can also opt to **include the session's console log** (last lines, default on) — then it opens a real GitHub issue via the session token. |
 | **Tryable demo** | The tokenless live demo ([`/#demo`](https://spuds0588.github.io/EdgeQA/#demo)) previews a public example repo and simulates the whole QA loop, including a fake issue submission, so visitors can experience the product before bringing their own repo. |
 | **Read-only share links** | Append `&readonly=1` to any session URL to hide the EdgeQA header and bug-reporting UI — a pure preview for sharing with stakeholders. |
 | **Paste-a-repo URL** | Drop in `https://github.com/acme/site` (or `acme/site`, or a `/tree/` branch URL) and the form fills itself. |
@@ -106,7 +106,7 @@ The project deploys to GitHub Pages automatically on every push to `main` via `.
 
 1. Open the magic link and enter the PIN.
 2. Test the app in the sandboxed preview — on desktop or mobile.
-3. Found something off? Hit **Report a bug** (side tab on desktop, tab on mobile) and file it — the session context is attached automatically.
+3. Found something off? Hit **Report a bug** (side tab on desktop, tab on mobile). The drawer shows exactly what will be auto-attached (repo, branch, page, screensize, device/browser, time) and lets you **include the session's console log** (on by default). Just describe the bug in one line — no need to know browser details — then submit; a real GitHub issue is opened for you.
 
 **Bookmarklet:** on the setup screen, drag **⚡ Install bookmarklet** to your bookmarks bar. While viewing any GitHub repo, click it and EdgeQA opens with that repo pre-filled.
 
@@ -134,7 +134,7 @@ tests/edgeqa.spec.ts     Playwright e2e specs
 
 ## Current status & roadmap
 
-Working today: link generation/decryption, the VFS service worker (with the real decrypted token handed off securely), repo-URL parsing, bookmarklet, the full landing experience, the in-context report drawer (desktop + mobile), **real GitHub issue creation** — reports are `POST`ed to the repo's Issues API with an `edgeqa-report` label and session context (path, viewport, UA) attached, with a link to the filed issue on success — and a **tokenless live demo** (`/#demo`) that previews this repo's public `examples/northstar/` site so anyone can try the platform without a repo or PAT.
+Working today: link generation/decryption, the VFS service worker (with the real decrypted token handed off securely), repo-URL parsing, bookmarklet, the full landing experience, the in-context report drawer (desktop + mobile), **real GitHub issue creation** — reports are `POST`ed to the repo's Issues API with an `edgeqa-report` label; the drawer transparently shows the auto-attached session context (repo, branch, page, screensize, device/browser, time) and can include the session's **console log** (optional, on by default), with a link to the filed issue on success — and a **tokenless live demo** (`/#demo`) that previews this repo's public `examples/northstar/` site so anyone can try the platform without a repo or PAT.
 
 Next up:
 

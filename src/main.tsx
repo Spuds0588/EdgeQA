@@ -154,12 +154,31 @@ function Viewer({ repo, branch, path, token, readonly, onExit }: { repo: string;
   const [reportError, setReportError] = useState("");
   const [sandboxLoaded, setSandboxLoaded] = useState(false);
   const [swReady, setSwReady] = useState(false);
+  const [includeLog, setIncludeLog] = useState(true);
+  const [logCount, setLogCount] = useState(0);
   const [owner, repoName] = repo.split("/");
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const base = import.meta.env.BASE_URL || "/";
   const baseRoot = base.endsWith("/") ? base : base + "/";
   const dir = path ? path.replace(/^\/+|\/+$/g, "") + "/" : "";
   const sandboxUrl = `${baseRoot}sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/${dir}index.html`;
+  // capture the session's console lines (a ring buffer) so the tester can opt to attach them to a report
+  const consoleBuf = useRef<{ level: string; line: string }[]>([]);
+  useEffect(() => {
+    const fmt = (a: unknown) => a instanceof Error ? `Error: ${a.message}` : typeof a === "string" ? a : (() => { try { const s = JSON.stringify(a); return s === undefined ? String(a) : s; } catch { return String(a); } })();
+    const originals: Record<string, (...args: any[]) => void> = {};
+    ["log", "info", "warn", "error", "debug"].forEach((level) => {
+      originals[level] = (console as any)[level].bind(console);
+      (console as any)[level] = (...args: any[]) => { consoleBuf.current.push({ level, line: args.map(fmt).join(" ") }); if (consoleBuf.current.length > 200) consoleBuf.current.shift(); setLogCount(consoleBuf.current.length); originals[level](...args); };
+    });
+    return () => Object.entries(originals).forEach(([level, fn]) => { (console as any)[level] = fn; });
+  }, []);
+  const device = useMemo(() => {
+    const ua = navigator.userAgent;
+    const os = /Windows/i.test(ua) ? "Windows" : /Mac OS X/i.test(ua) ? "macOS" : /Android/i.test(ua) ? "Android" : /iPhone|iPad/i.test(ua) ? "iOS" : /Linux/i.test(ua) ? "Linux" : "Unknown OS";
+    const browser = /Edg\//i.test(ua) ? "Edge" : /OPR\//i.test(ua) ? "Opera" : /Firefox\//i.test(ua) ? "Firefox" : /Chrome\//i.test(ua) ? "Chrome" : /Safari\//i.test(ua) ? "Safari" : "Other";
+    return `${browser} · ${os}`;
+  }, []);
   useEffect(() => {
     if (!("serviceWorker" in navigator)) {
       setSwReady(true);
@@ -198,17 +217,20 @@ function Viewer({ repo, branch, path, token, readonly, onExit }: { repo: string;
       setDemoFiled(true); setTitle(""); setBody(""); setSubmitting(false);
       return;
     }
-    const path = iframeRef.current?.contentWindow?.location.pathname || sandboxUrl;
+    const pagePath = iframeRef.current?.contentWindow?.location.pathname || sandboxUrl;
+    const capturedLog = includeLog ? consoleBuf.current.slice(-80).map((e) => `[${e.level}] ${e.line}`) : [];
     const context = [
       "**Reported via EdgeQA**",
       `- Repository: \`${repo}\``,
       `- Branch: \`${branch}\``,
-      `- Path: \`${path}\``,
+      `- Page: \`${pagePath}\``,
       `- Viewport: ${window.innerWidth}×${window.innerHeight}`,
-      `- UA: ${navigator.userAgent}`,
-      "",
-      body.trim(),
-    ].join("\n");
+      `- Device: ${device}`,
+      `- Browser: ${navigator.userAgent}`,
+      `- Time: ${new Date().toLocaleString()}`,
+      body.trim() ? `\n### What happened\n\n${body.trim()}` : "",
+      capturedLog.length ? `\n### Console log (from this QA session)\n\n\`\`\`\n${capturedLog.join("\n")}\n\`\`\`` : "",
+    ].filter(Boolean).join("\n");
     try {
       const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/issues`, {
         method: "POST",
@@ -232,7 +254,7 @@ function Viewer({ repo, branch, path, token, readonly, onExit }: { repo: string;
     }
   };
   if (readonly) return <div className="viewer"><div className="viewer-body">{swReady && <iframe ref={iframeRef} id="sandbox" title="EdgeQA repository sandbox" src={sandboxUrl} onLoad={() => setSandboxLoaded(true)} />}{!sandboxLoaded && <div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Loading preview…</h2><p>{token ? <>Unlocking <b>{repo}</b> on the <b>{branch}</b> branch.</> : <>Opening the public demo for <b>{repo}</b>.</>}</p><small>Service Worker VFS · {token ? "Token held in memory" : "No token needed for public repos"}</small></div>}</div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}</div>;
-  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}{path ? `/${path}` : ""}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}><Bug size={14} /> Report a bug</button></div></div><div className="viewer-body">{swReady && <iframe ref={iframeRef} id="sandbox" title="EdgeQA repository sandbox" src={sandboxUrl} onLoad={() => setSandboxLoaded(true)} />}{!sandboxLoaded && <div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Loading preview…</h2><p>{token ? <>Unlocking <b>{repo}</b> on the <b>{branch}</b> branch.</> : <>Opening the public demo for <b>{repo}</b>.</>}</p><small>Service Worker VFS · {token ? "Token held in memory" : "No token needed for public repos"}</small></div>}</div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}><Bug size={16} /><span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div>{demoFiled ? <div className="report-done"><div className="empty-icon"><Check size={22} /></div><h3>Issue filed ✓</h3><p><b>Demo mode</b> — this was a simulation, nothing was created on GitHub.</p><a className="issue-link" href={`https://github.com/${owner || "owner"}/${repoName || "repo"}/issues/new`} target="_blank" rel="noreferrer">File a real issue on the repo <ArrowRight size={13} /></a><button className="again" onClick={() => setDemoFiled(false)}>File another</button></div> : issueUrl ? <div className="report-done"><div className="empty-icon"><Check size={22} /></div><h3>Issue filed ✓</h3><p>Filed against <b>{repo}</b> with session context attached.</p><a className="issue-link" href={issueUrl} target="_blank" rel="noreferrer">View on GitHub <ArrowRight size={13} /></a><button className="again" onClick={() => { setIssueUrl(""); setDemoFiled(false); }}>File another</button></div> : <><label>Short title<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe the bug and what you expected instead…" rows={6} /></label>{reportError && <div className="error">{reportError}</div>}<p className="report-context">{token ? <>Filed against <b>{repo}</b> · current path, viewport, and UA attached automatically.</> : <>Demo mode — submitting simulates filing an issue; nothing is created on GitHub.</>}</p><button className="submit" disabled={submitting || !title.trim()} onClick={submitIssue}>{submitting ? "Filing issue…" : token ? "Create GitHub issue" : "File demo issue"}{!submitting && <ArrowRight size={16} />}</button></>}</aside></div>;
+  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}{path ? `/${path}` : ""}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}><Bug size={14} /> Report a bug</button></div></div><div className="viewer-body">{swReady && <iframe ref={iframeRef} id="sandbox" title="EdgeQA repository sandbox" src={sandboxUrl} onLoad={() => setSandboxLoaded(true)} />}{!sandboxLoaded && <div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Loading preview…</h2><p>{token ? <>Unlocking <b>{repo}</b> on the <b>{branch}</b> branch.</> : <>Opening the public demo for <b>{repo}</b>.</>}</p><small>Service Worker VFS · {token ? "Token held in memory" : "No token needed for public repos"}</small></div>}</div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}><Bug size={16} /><span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div>{demoFiled ? <div className="report-done"><div className="empty-icon"><Check size={22} /></div><h3>Issue filed ✓</h3><p><b>Demo mode</b> — this was a simulation, nothing was created on GitHub.</p><a className="issue-link" href={`https://github.com/${owner || "owner"}/${repoName || "repo"}/issues/new`} target="_blank" rel="noreferrer">File a real issue on the repo <ArrowRight size={13} /></a><button className="again" onClick={() => setDemoFiled(false)}>File another</button></div> : issueUrl ? <div className="report-done"><div className="empty-icon"><Check size={22} /></div><h3>Issue filed ✓</h3><p>Filed against <b>{repo}</b> with session context attached.</p><a className="issue-link" href={issueUrl} target="_blank" rel="noreferrer">View on GitHub <ArrowRight size={13} /></a><button className="again" onClick={() => { setIssueUrl(""); setDemoFiled(false); }}>File another</button></div> : <><label>Short title<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe the bug and what you expected instead…" rows={6} /></label>{reportError && <div className="error">{reportError}</div>}<details className="sys"><summary>What gets attached to this report <em>{token ? "auto" : "in demo"}</em></summary><div className="sys-grid"><span><b>Repo</b>{repo}</span><span><b>Branch</b>{branch}</span><span><b>Page</b>/{path || "index.html"}</span><span><b>Screensize</b>{window.innerWidth}×{window.innerHeight}</span><span><b>Device</b>{device}</span><span><b>Time</b>{new Date().toLocaleString()}</span></div></details><label className="log-opt"><input type="checkbox" checked={includeLog} onChange={(e) => setIncludeLog(e.target.checked)} /><span>Attach the session's console log<small>{logCount ? `${logCount} line${logCount === 1 ? "" : "s"} captured` : "nothing captured yet"}</small></span></label><p className="report-context">{token ? <>Filed against <b>{repo}</b> as a GitHub issue. Nothing leaves your browser until you hit submit.</> : <>Demo mode — submitting simulates filing an issue; nothing is created on GitHub.</>}</p><button className="submit" disabled={submitting || !title.trim()} onClick={submitIssue}>{submitting ? "Filing issue…" : token ? "Create GitHub issue" : "File demo issue"}{!submitting && <ArrowRight size={16} />}</button></>}</aside></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
