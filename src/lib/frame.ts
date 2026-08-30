@@ -64,7 +64,9 @@ function rewriteBareImports(js: string, cfg?: RewriteCfg): string {
     // breaks hooks.
     const pkgName = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0];
     const pkgVer = cfg!.depVersions && (cfg!.depVersions[spec] || cfg!.depVersions[pkgName]);
-    if (pkgVer && !/^(workspace|file|link|npm|github):/i.test(pkgVer)) {
+    // `workspace:` / `catalog:` (pnpm) and other meta-protocols aren't npm versions — skip the
+    // pin and let esm.sh resolve latest rather than pinning to a sentinel like `catalog:frontend`.
+    if (pkgVer && !/^(workspace|file|link|npm|github|catalog):/i.test(pkgVer)) {
       const sub = spec.slice(pkgName.length).replace(/^\//, "");
       url = `${ESM_CDN}${pkgName}@${encodeURIComponent(pkgVer)}${sub ? "/" + sub : ""}`;
     }
@@ -80,9 +82,21 @@ function rewriteBareImports(js: string, cfg?: RewriteCfg): string {
 // Provide a module-scoped shim (production semantics) so `import.meta.env.MODE` and friends
 // don't crash real apps (mirrors the SW's copy).
 function shimEnv(js: string): string {
-  if (!/import\.meta\.env/.test(js)) return js;
-  const shim = 'const __edgeqa_env = { MODE: "production", DEV: false, PROD: true, SSR: false, BASE_URL: "/" };';
-  return shim + "\n" + js.replace(/import\.meta\.env(?=[^A-Za-z0-9_$])/g, "__edgeqa_env");
+  // Vite injects import.meta.env (and glob/hot glue) into every module; transpiled source still
+  // references them. env gets production semantics; glob/globEager return an empty module map so
+  // dynamic `for (const [path, loader] of Object.entries(import.meta.glob(...)))` loops iterate
+  // nothing instead of crashing on an unregistered Vite-only API; hot is undefined. import.meta.url
+  // is left untouched. Mirrors edgeqa-sw.js's copy.
+  if (!/import\.meta\.(env|glob|globEager|hot)(?=[^A-Za-z0-9_$])/.test(js)) return js;
+  const shim = 'const __edgeqa_env = { MODE: "production", DEV: false, PROD: true, SSR: false, BASE_URL: "/" };'
+    + '\nconst __edgeqa_glob = () => ({});'
+    + '\nconst __edgeqa_globEager = () => ({});'
+    + '\nconst __edgeqa_hot = undefined;';
+  return shim + "\n" + js
+    .replace(/import\.meta\.env(?=[^A-Za-z0-9_$])/g, "__edgeqa_env")
+    .replace(/import\.meta\.globEager(?=[^A-Za-z0-9_$])/g, "__edgeqa_globEager")
+    .replace(/import\.meta\.glob(?=[^A-Za-z0-9_$])/g, "__edgeqa_glob")
+    .replace(/import\.meta\.hot(?=[^A-Za-z0-9_$])/g, "__edgeqa_hot");
 }
 
 // A CSS import can reference a package file (import "pkg/style.css") — those need the same

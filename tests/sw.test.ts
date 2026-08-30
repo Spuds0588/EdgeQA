@@ -437,6 +437,21 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(await res.text()).toContain(`from \"https://esm.sh/@hookform/resolvers@%5E3.9.0/yup\"`);
   });
 
+  it("preset scope: pnpm catalog: version protocols never become pins", async () => {
+    const pkg = JSON.stringify({ dependencies: { vue: "catalog:frontend", vueuse: "catalog:" } });
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.includes("/package.json")) return ok(pkg, 200, "application/json");
+      return ok('import { n } from \"vue\";\nimport { useDark } from \"vueuse\";\nexport default n;', 200, "text/plain");
+    });
+    const sw = makeSW(fetchMock);
+    await sw.message({ type: "SET_PRESET", scope: "antfu/vitesse/main", preset: "vue", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/antfu/vitesse/main/src/main.js");
+    const text = await res.text();
+    expect(text).toContain(`from \"https://esm.sh/vue\"`); // no @catalog%3Afrontend junky pin
+    expect(text).not.toContain("catalog");
+    expect(text).not.toContain("frontend");
+  });
+
   it("preset scope: workspace/file dep specs never become version pins", async () => {
     const pkg = JSON.stringify({ dependencies: { "@applemusic-like-lyrics/core": "workspace:^", "@repo/ui": "file:../ui" } });
     const fetchMock = vi.fn<FetchMock>(async (url: string) => {
@@ -459,6 +474,20 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(text).toContain("__edgeqa_env = { MODE");
     expect(text).toContain("__edgeqa_env.MODE");
     expect(text).not.toContain("import.meta.env.MODE");
+    expect(text).not.toContain("import.meta.url"); // import.meta.url untouched
+  });
+
+  it("preset scope: import.meta.glob/globEager/hot get safe shims (empty map, undefined)", async () => {
+    const sw = makeSW(htmlFetch('const routes = import.meta.glob("./routes/*.ts");\nconst eager = import.meta.globEager("./comp/*");\nimport.meta.hot?.accept();\nexport const x = Object.keys(routes).length;'));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
+    const text = await res.text();
+    expect(text).toContain("__edgeqa_glob = () => ({})");
+    expect(text).toContain("__edgeqa_globEager = () => ({})");
+    expect(text).not.toContain("import.meta.glob");
+    expect(text).not.toContain("import.meta.globEager");
+    expect(text).not.toContain("import.meta.hot");
+    expect(text).toContain("__edgeqa_hot?.accept"); // undefined?.accept is safe
     expect(text).not.toContain("import.meta.url"); // import.meta.url untouched
   });
 

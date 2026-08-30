@@ -41,6 +41,27 @@ const REPOS = [
   { id: "zen",            repo: "sheshbabu/zen", branch: "master", path: "docs", preset: "", expect: /zen|notes|Zettelkasten/i },
   // Negative: Angular source is out of scope — must degrade, not crash
   { id: "altair-angular", repo: "imolorhe/altair", branch: "master", path: "packages/altair-app/src", preset: "", expect: null, degrade: true },
+  // ---- Round 3: fresh real apps on new axes ----
+  // leva: real React controls library demo. `leva/headless` (and @leva-ui/plugin-*/ workspace
+  // packages) 404 on esm.sh's build servers — an esm.sh-side limitation, not a platform bug.
+  { id: "leva",          repo: "pmndrs/leva", branch: "main", path: "demo", preset: "react", local: "src", expect: null, degrade: true },
+  // solid-playground: REAL SolidJS Vite app. Solid JSX is NOT React, so detectPreset must NOT
+  // pick the generic "jsx" preset (it transpiles JSX to the React runtime and renders nothing).
+  // Egg for detection correctness — the app should degrade cleanly, not mount `SolidPlayground`.
+  { id: "solid-playground", repo: "solidjs/solid-playground", branch: "main", path: "packages/playground", preset: "", expect: null, degrade: true },
+  // vitesse: real Vue Vite app (pnpm `catalog:` deps). The catalog-version fix lets Vue resolve
+  // and main.ts boot; it still needs vite-plugin-vue-layouts' `virtual:generated-layouts` codegen
+  // (a Vite build step) so the full app doesn't mount — documented out-of-scope degrade.
+  { id: "vitesse",      repo: "antfu/vitesse", branch: "main", path: "", preset: "vue", local: "src", expect: null, degrade: true },
+  // element-plus play: real Vue component-library dev playground. Out of scope — unpublished
+  // workspace `@element-plus/components/*/style` subpaths, `import.meta.glob`, and Sass theme need
+  // a real build. Must degrade cleanly (document loads, no module-tier crash).
+  { id: "element-plus", repo: "element-plus/element-plus", branch: "dev", path: "play", preset: "vue", local: "src", expect: null, degrade: true },
+  // three.js examples: real static ES-module demos (deep relative ../../build imports, large files)
+  { id: "threejs",      repo: "mrdoob/three.js", branch: "dev", path: "examples", preset: "", expect: /three\.js|WebGL|example|geometry/i },
+  // mermaid demos: real static site — the index page renders its own DOM (a live link list), not
+  // inline SVGs (those live per-demo pages).
+  { id: "mermaid",      repo: "mermaid-js/mermaid", branch: "develop", path: "demos", preset: "", expect: /Mermaid|quick test|demo|flowchart/i },
 ];
 
 const results = [];

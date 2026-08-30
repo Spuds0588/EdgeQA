@@ -56,6 +56,12 @@ describe("detectPreset (framework detection)", () => {
     expect(detectPreset(tree, null)).toBe("jsx");
   });
 
+  it("Solid source never gets a misleading generic jsx preset (Solid JSX is not React)", () => {
+    const tree = [{ path: "packages/playground/vite.config.ts", type: "blob" }, { path: "packages/playground/src/main.tsx", type: "blob" }];
+    expect(detectPreset(tree, { dependencies: { "solid-js": "1.9.14", "@solidjs/router": "^0.16" } })).toBeNull();
+    expect(detectPreset(tree, { dependencies: { "solid-js": "1.9.14" } })).toBeNull();
+  });
+
   it("pure static tree → null (no framework)", () => {
     const tree = [{ path: "index.html", type: "blob" }, { path: "styles.css", type: "blob" }];
     expect(detectPreset(tree, null)).toBeNull();

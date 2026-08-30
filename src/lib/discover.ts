@@ -94,6 +94,11 @@ export function detectPreset(tree: { path: string; type: string }[], pkg: any): 
   if (deps["react"] && deps["react-dom"]) return "react";
   if (deps["vue"]) return "vue";
   if (deps["svelte"]) return "svelte";
+  // Solid/Angular/other committed frameworks whose JSX is NOT React: refusing a preset here is
+  // better than mislabeling them as generic "jsx". The generic preset transpiles JSX to the React
+  // runtime, which silently produces nothing for a Solid app — a confusing blank page instead of
+  // a clean unsupported-framework degrade. Skipping lets them fall through as unservable source.
+  if (deps["solid-js"] || deps["@solidjs/router"] || deps["solid-start"] || deps["@angular/core"] || deps["@analogjs/platform"]) return null;
   // file-signal fallbacks (no usable package.json)
   if (has(/^vite\.config\./)) return "jsx";
   if (has(/\.svelte$/)) return "svelte";

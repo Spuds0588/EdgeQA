@@ -114,7 +114,9 @@ function rewriteBareImports(js, cfg) {
     const pkgName = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0];
     const pkgVer = cfg.depVersions && (cfg.depVersions[spec] || cfg.depVersions[pkgName]);
     // Workspace/file/link specs aren't npm versions — skip the pin and let esm.sh resolve latest.
-    if (pkgVer && !/^(workspace|file|link|npm|github):/i.test(pkgVer)) {
+    // `workspace:` / `catalog:` (pnpm) and other meta-protocols aren't npm versions — skip the
+    // pin and let esm.sh resolve latest rather than pinning to a sentinel like `catalog:frontend`.
+    if (pkgVer && !/^(workspace|file|link|npm|github|catalog):/i.test(pkgVer)) {
       const sub = spec.slice(pkgName.length).replace(/^\//, "");
       url = `${ESM_CDN}${pkgName}@${encodeURIComponent(pkgVer)}${sub ? "/" + sub : ""}`;
     }
@@ -151,9 +153,21 @@ function transpileModule(code, path, extraDir, cfg) {
 // Provide a module-scoped shim (production semantics) so `import.meta.env.MODE` and friends
 // don't crash real apps. Real VITE_* vars are unknowable here — they read as undefined.
 function shimEnv(js) {
-  if (!/import\.meta\.env/.test(js)) return js;
-  const shim = 'const __edgeqa_env = { MODE: "production", DEV: false, PROD: true, SSR: false, BASE_URL: "/" };';
-  return shim + "\n" + js.replace(/import\.meta\.env(?=[^A-Za-z0-9_$])/g, "__edgeqa_env");
+  // Vite injects import.meta.env (and glob/hot glue) into every module; transpiled source still
+  // references them. env gets production semantics; glob/globEager return an empty module map so
+  // dynamic `for (const [path, loader] of Object.entries(import.meta.glob(...)))` loops iterate
+  // nothing instead of crashing on an unregistered Vite-only API; hot is undefined. import.meta.url
+  // is left untouched. Mirrors frame.ts's copy.
+  if (!/import\.meta\.(env|glob|globEager|hot)(?=[^A-Za-z0-9_$])/.test(js)) return js;
+  const shim = 'const __edgeqa_env = { MODE: "production", DEV: false, PROD: true, SSR: false, BASE_URL: "/" };'
+    + '\nconst __edgeqa_glob = () => ({});'
+    + '\nconst __edgeqa_globEager = () => ({});'
+    + '\nconst __edgeqa_hot = undefined;';
+  return shim + "\n" + js
+    .replace(/import\.meta\.env(?=[^A-Za-z0-9_$])/g, "__edgeqa_env")
+    .replace(/import\.meta\.globEager(?=[^A-Za-z0-9_$])/g, "__edgeqa_globEager")
+    .replace(/import\.meta\.glob(?=[^A-Za-z0-9_$])/g, "__edgeqa_glob")
+    .replace(/import\.meta\.hot(?=[^A-Za-z0-9_$])/g, "__edgeqa_hot");
 }
 
 // Shared per-module post-processing for the JSX/plain-JS tiers served directly by this
@@ -459,7 +473,7 @@ self.addEventListener("fetch", (event) => {
         if (extraDir) servedDir = servedDir.replace(new RegExp(`/${extraDir.replace(/\//g, "\\/")}$`), "");
       }
       const dv = depVersions || {};
-      const pin = (name) => (dv[name] && !/^(workspace|file|link|npm|github):/i.test(dv[name]) ? `${name}@${encodeURIComponent(dv[name])}` : "");
+      const pin = (name) => (dv[name] && !/^(workspace|file|link|npm|github|catalog):/i.test(dv[name]) ? `${name}@${encodeURIComponent(dv[name])}` : "");
       // The runtime frameworks the app pins (and their dom/client halves) become peer-deps
       // of every esm.sh import so the whole graph shares ONE copy (duplicates break hooks).
       const frameworkPins = preset === "vue" ? ["vue"] : preset === "svelte" ? ["svelte"] : ["react", "react-dom", "preact"];
