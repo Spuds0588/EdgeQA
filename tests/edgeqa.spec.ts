@@ -16,8 +16,7 @@ test.describe("EdgeQA v1", () => {
     await page.getByRole("button", { name: /Generate magic link/ }).click();
     await expect(page.getByText(/Add a repository/)).toBeVisible();
 
-    await page.getByLabel("Repository owner").fill("acme");
-    await page.getByLabel("Repository name").fill("site");
+    await page.getByLabel("Repository URL").fill("https://github.com/acme/site");
     await page.getByLabel("GitHub fine-grained token").fill("github_pat_test");
     await page.getByLabel("Session PIN").fill("private-pin");
     await page.getByRole("button", { name: /Generate magic link/ }).click();
