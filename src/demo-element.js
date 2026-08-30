@@ -193,11 +193,6 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
   <div class="win">
     <div class="chrome"><div class="lights"><i></i><i></i><i></i></div><div class="addr">◆&nbsp; edgeqa.local <span id="addr">/sandbox/…</span></div><div class="live"><i></i>&nbsp;LIVE</div></div>
     <div class="body">
-      <aside class="rail"><div class="logo"><span class="lmark">${LOGO}</span> edgeqa</div><div class="sect">WORKSPACE</div>
-        <div class="item on">◈ Preview</div>
-        <div class="sect">REPOSITORY</div><div class="item dim"><span id="repoName">acme/marketing-site</span></div><div class="item dim"><span id="branchName">main</span></div>
-        <div class="foot"><div class="ava">JD</div><span><b>QA session</b><small>Token in memory</small></span></div>
-      </aside>
       <div class="site">
         <div class="sitebar"><b>✦ Northstar</b><span class="ws">Acme Studio / <b>Website Redesign</b></span><button class="invite">＋ Invite</button><button class="newtask">＋ New task</button></div>
         <div class="workspace"><div class="snap" id="snap"></div><div class="errbanner" id="eBanner">⚠ Task creation failed — <b>server 500</b></div>
@@ -312,8 +307,6 @@ export default class EdgeQaDemo extends HTMLElement {
     const repo = this.getAttribute("repo") || "marketing-site";
     const branch = this.getAttribute("branch") || "main";
     this.shadowRoot.querySelector("#addr").textContent = `/sandbox/${owner}/${repo}/${branch}`;
-    this.shadowRoot.querySelector("#repoName").textContent = `${owner}/${repo}`;
-    this.shadowRoot.querySelector("#branchName").textContent = branch;
     this.shadowRoot.querySelector("#dRepo").textContent = `${owner}/${repo} · ${branch}`;
     this.shadowRoot.querySelector("#toastMsg").textContent = `${owner}/${repo} · issue opened`;
     this.shadowRoot.querySelector("#chatRepo").textContent = `/sandbox/${owner}/${repo}`;
