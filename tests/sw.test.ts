@@ -225,14 +225,40 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(fetchMock.mock.calls.some(([u]) => u.includes("raw.githubusercontent.com") && u.endsWith("/main/index.html"))).toBe(true);
   });
 
-  it("preset scope: injects an import map and rewrites absolute asset paths in HTML", async () => {
+  it("preset scope: rewrites absolute asset paths in HTML (no import map needed)", async () => {
     const sw = makeSW(htmlFetch('<html><head><title>App</title></head><body><script type="module" src="/src/main.tsx"></script></body></html>'));
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/index.html");
     const text = await res.text();
-    expect(text).toContain("type=\"importmap\"");
-    expect(text).toContain("esm.sh/react");
+    expect(text).not.toContain("importmap"); // resolution happens per-module
     expect(text).toContain("src=\"src/main.tsx\""); // absolute /src → relative to doc dir (root)
+  });
+
+  it("preset scope: any bare npm import is rewritten to the esm.sh CDN", async () => {
+    const fakeBabel = { transform: (code: string, opts: any) => ({ code: `/*${opts.filename}*/` + code }) };
+    const src = `import { observer } from \"mobx-react\";\nimport { useQuery } from \"@tanstack/react-query\";\nimport deep from \"lodash/fp\";\nimport icon from \"./Logo.svg\";\nexport const App = () => <logo/>;`;
+    const sw = makeSW(htmlFetch(src), { Babel: fakeBabel });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/App.jsx");
+    const text = await res.text();
+    expect(text).toContain("https://esm.sh/mobx-react");
+    expect(text).toContain("https://esm.sh/@tanstack/react-query");
+    expect(text).toContain("https://esm.sh/lodash/fp");
+    expect(text).not.toContain(`from \"./Logo.svg\"`); // asset import rewritten to URL string
+  });
+
+  it("preset scope: plain ESM .js source also gets bare imports rewritten (no babel)", async () => {
+    const sw = makeSW(htmlFetch(`import { createStore } from \"redux\";\nexport const s = createStore();`));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "jsx" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/store.js");
+    expect(await res.text()).toContain("https://esm.sh/redux");
+  });
+
+  it("preset scope: committed build artifacts (dist) pass through untouched", async () => {
+    const sw = makeSW(htmlFetch(`import { createStore } from \"redux\";`));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "jsx" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/dist/app.js");
+    expect(await res.text()).toBe(`import { createStore } from \"redux\";`); // untouched
   });
 
   it("preset scope: absolute paths rewrite relative to a subfolder document", async () => {
@@ -266,7 +292,7 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(text).toContain("index.css"); // injector references it
     expect(text).not.toContain("import heroImg"); // asset import rewritten
     expect(text).toContain("const heroImg = new URL('./assets/hero.png', import.meta.url).href");
-    expect(text).toContain("import { useState } from 'react'"); // bare imports untouched (import map resolves them)
+    expect(text).toContain("https://esm.sh/react"); // bare import rewritten to the esm.sh CDN
   });
 
   it("preset scope: extensionless module import resolves to ./name.jsx (vite-style)", async () => {

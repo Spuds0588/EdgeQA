@@ -19,38 +19,15 @@ log("service worker starting, scope", scopePath);
 const mime = { html: "text/html", css: "text/css", scss: "text/css", sass: "text/css", less: "text/css", styl: "text/css", js: "application/javascript", mjs: "application/javascript", json: "application/json", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", txt: "text/plain", map: "application/json" };
 
 // --- Experimental in-browser build tier (react / preact / generic jsx+tsx) ---
-// Source repos (vite/react/etc.) are transpiled on the fly: JSX/TSX through
-// @babel/standalone, bare imports resolved via an injected import map to esm.sh.
-// This is the "build" half of the kind:"build" resolver seam — no server, no
-// bundler, no token leaving the browser.
+// Source repos (vite/react/etc.) are transpiled on the fly through @babel/standalone
+// (JSX/TSX) and every bare npm import is rewritten at serve time to the esm.sh CDN, so
+// ANY dependency a real app imports resolves in the browser — no hand-mapped allowlist.
+// esm.sh resolves versions/subpaths, bundles each package, and rewrites its own bare
+// imports, so heavy-dep source apps render instead of only the lean ones.
+// This is the "build" half of the kind:"build" resolver seam — no server, no bundler,
+// no token leaving the browser.
 const BABEL_URL = "https://unpkg.com/@babel/standalone@7.26.4/babel.min.js";
-const PRESET_IMPORT_MAP = {
-  react: "https://esm.sh/react@19.1.0",
-  "react-dom": "https://esm.sh/react-dom@19.1.0",
-  "react-dom/client": "https://esm.sh/react-dom@19.1.0/client",
-  "react/jsx-runtime": "https://esm.sh/react@19.1.0/jsx-runtime",
-  "react/jsx-dev-runtime": "https://esm.sh/react@19.1.0/jsx-dev-runtime",
-  preact: "https://esm.sh/preact@10.26.4",
-  "preact/hooks": "https://esm.sh/preact@10.26.4/hooks",
-  "preact/compat": "https://esm.sh/preact@10.26.4/compat",
-  "preact/jsx-runtime": "https://esm.sh/preact@10.26.4/jsx-runtime",
-  "preact-router": "https://esm.sh/preact-router@4.1.2",
-  "preact/devtools/src/devtools": "https://esm.sh/preact@10.26.4/devtools/src/devtools",
-  "preact/debug/src/debug": "https://esm.sh/preact@10.26.4/debug/src/debug",
-  "mobx": "https://esm.sh/mobx@6.13.5",
-  "mobx-react": "https://esm.sh/mobx-react@9.2.0",
-  "mobx-state-tree": "https://esm.sh/mobx-state-tree@5.4.2",
-  "react-redux": "https://esm.sh/react-redux@9.2.0",
-  "@reduxjs/toolkit": "https://esm.sh/@reduxjs/toolkit@2.5.0",
-  "zustand": "https://esm.sh/zustand@5.0.3",
-  "styled-components": "https://esm.sh/styled-components@6.1.14",
-  "htm": "https://esm.sh/htm@3.1.1",
-  "redux": "https://esm.sh/redux@5.0.1",
-  "react-router-dom": "https://esm.sh/react-router-dom@6.30.0",
-  "@material-ui/core/TextField": "https://esm.sh/@material-ui/core@4.12.4/TextField",
-  "d3-scale": "https://esm.sh/d3-scale@4.0.2",
-  "d3-selection": "https://esm.sh/d3-selection@3.0.0",
-};
+const ESM_CDN = "https://esm.sh/";
 const presetByScope = new Map();
 
 // importScripts() is only legal in a service worker during install/evaluation, so
@@ -86,9 +63,22 @@ async function ensureBabel() {
   }
 }
 
+// Rewrite bare npm specifiers (react, react-dom/client, @tanstack/react-query, …) to
+// absolute esm.sh URLs — esm.sh resolves subpaths/versions and bundles each package, so
+// any dependency a real source app imports works here. Relative (./), absolute (/),
+// and URL (https:/data:...) specifiers are left untouched.
+function rewriteBareImports(js) {
+  return js.replace(/((?:from\s+|import\s*\(|(?:^|[;\n]\s*)import\s+|export\s+[^;]*?from\s+))(['"])([^'"]+)(\2)/g, (m, ctx, q, spec, endq) => {
+    if (spec && !spec.startsWith(".") && !spec.startsWith("/") && !/^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) {
+      return `${ctx}${q}${ESM_CDN}${spec}${endq}`;
+    }
+    return m;
+  });
+}
+
 // Transpile JSX/TSX and rewrite CSS imports into stylesheet-link injectors (vite
-// style `import "./App.css"`). Bare imports (react, preact/hooks) are left alone
-// — the injected import map resolves them.
+// style `import "./App.css"`). Any remaining bare imports are rewritten to esm.sh
+// so the browser resolves them without an import map.
 function transpileModule(code, path, extraDir) {
   const isTs = /\.tsx?$/i.test(path);
   const presets = isTs ? [["react", { runtime: "automatic" }], "typescript"] : [["react", { runtime: "automatic" }]];
@@ -114,20 +104,16 @@ function transpileModule(code, path, extraDir) {
     const injector = cssUrls.map((u) => `(()=>{const l=document.createElement("link");l.rel="stylesheet";l.href=new URL(${JSON.stringify(u)},import.meta.url).href;document.head.appendChild(l);})();`).join("");
     js = injector + js;
   }
+  js = rewriteBareImports(js);
   return js;
 }
 
-// Inject the import map and rewrite app-root-absolute asset refs ("/src/main.tsx")
-// to be relative to this document's directory — vite dev HTML treats "/x" as
-// relative to the folder holding index.html, which is exactly what the sandbox
-// entry document represents.
+// Rewrite app-root-absolute asset refs ("/src/main.tsx") to be relative to this
+// document's directory — vite dev HTML treats "/x" as relative to the folder holding
+// index.html, which is exactly what the sandbox entry document represents. Bare-import
+// resolution happens per-module (see rewriteBareImports), so no import map is needed.
 function transformHtml(html, path) {
-  const importMap = `<script type="importmap">${JSON.stringify({ imports: PRESET_IMPORT_MAP })}</script>`;
-  let out = html;
-  if (/<head[^>]*>/i.test(out)) out = out.replace(/(<head[^>]*>)/i, `$1${importMap}`);
-  else out = importMap + out;
-  out = out.replace(/((?:src|href|poster)=[""])\/(?!\/)([^""]*)/g, (m, pre, p) => `${pre}${p}`);
-  return out;
+  return html.replace(/((?:src|href|poster)=[""])\/(?!\/)([^""]*)/g, (m, pre, p) => `${pre}${p}`);
 }
 
 // Returns a transformed Response, or null when no transform applies (or babel is
@@ -143,6 +129,13 @@ async function applyPreset(res, info, extraDir) {
       const text = await res.text();
       if (!(await ensureBabel())) return new Response("/*SW-BABEL-FAIL*/" + text, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
       return new Response("/*SW-TRANSPILED*/" + transpileModule(text, p, extraDir), { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
+    }
+    // Plain ESM source (.js/.mjs) that isn't a build artifact: no JSX to transpile, but
+    // still rewrite bare imports so npm deps resolve. Skipped for build output folders so
+    // committed bundles pass through untouched.
+    if (/\.(js|mjs)$/i.test(p) && !/(^|\/)(dist|build|out|output|bundles|bundle)\/|(^|\/)(dist|bundle)[^/]*\.js/i.test(p)) {
+      const text = await res.text();
+      return new Response("/*SW-REWRITTEN*/" + rewriteBareImports(text), { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
     }
   } catch (error) { log("preset transform failed", info.path, String(error)); }
   return null;
