@@ -2,7 +2,7 @@
 
 **🔗 Live site:** [https://spuds0588.github.io/EdgeQA/](https://spuds0588.github.io/EdgeQA/)
 
-**▶ Try the live demo** (no repo or token needed): [open a QA session for the example project](https://spuds0588.github.io/EdgeQA/#demo) — it previews the public [`examples/northstar/`](examples/northstar/) site straight from this repo's files via the VFS, and you can walk the whole flow including a **simulated issue filing** (nothing is actually created on GitHub). Share it read-only with [`#demo&readonly=1`](https://spuds0588.github.io/EdgeQA/#demo&readonly=1) to hide the EdgeQA chrome.
+**▶ Try the live demo** (no repo or token needed): [open a QA session for the example project](https://spuds0588.github.io/EdgeQA/#demo) — it previews the public [`examples/northstar/`](examples/northstar/) site straight from this repo's files via the VFS. The example is a fake **project-management + chat workspace** (kanban board, team chat) with a **built-in bug** for you to find — "New task" fails with a server 500, and "Invite teammate" silently does nothing — so you can experience the whole report flow, including a **simulated issue filing** (nothing is actually created on GitHub). Share it read-only with [`#demo&readonly=1`](https://spuds0588.github.io/EdgeQA/#demo&readonly=1) to hide the EdgeQA chrome.
 
 [![Deploy to GitHub Pages](https://github.com/Spuds0588/EdgeQA/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/Spuds0588/EdgeQA/actions/workflows/deploy-pages.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -31,7 +31,7 @@ Staging environments are a pain. Deploying every branch to a preview host is slo
 | **Large-asset fallback** | Handles GitHub's 1MB contents-API limit via the Git Database API (up to 100MB), and synthesizes safe placeholders for anything larger. |
 | **SPA fallback** | Virtual 404s fall back to `index.html`, so client-side routers work. |
 | **In-context bug reporting** | A report drawer (side panel on desktop, bottom sheet on mobile) collects title + description and shows exactly what will be auto-attached (repo, branch, page, screensize, device/browser, time) before you click submit. You can also opt to **include the session's console log** (last lines, default on) — then it opens a real GitHub issue via the session token. |
-| **Tryable demo** | The tokenless live demo ([`/#demo`](https://spuds0588.github.io/EdgeQA/#demo)) previews a public example repo and simulates the whole QA loop, including a fake issue submission, so visitors can experience the product before bringing their own repo. |
+| **Tryable demo** | The tokenless live demo ([`/#demo`](https://spuds0588.github.io/EdgeQA/#demo)) previews a public example repo — a fake project-management + chat workspace with a built-in bug to find — and simulates the whole QA loop, including a fake issue submission, so visitors can experience the product before bringing their own repo. |
 | **Read-only share links** | Append `&readonly=1` to any session URL to hide the EdgeQA header and bug-reporting UI — a pure preview for sharing with stakeholders. |
 | **Paste-a-repo URL** | Drop in `https://github.com/acme/site` (or `acme/site`, or a `/tree/` branch URL) and the form fills itself. |
 | **Bookmarklet** | One-click pre-fill from any GitHub repo page. |
@@ -145,6 +145,14 @@ Next up:
 - No server-side code execution (Node.js, PHP, API routes).
 - Apps that need injected `.env` secrets won't run in the sandbox.
 - Highly complex bundler module graphs (nested Webpack/Vite resolution) are out of scope.
+
+## Sandbox origin & CORS
+
+The previewed app runs inside an iframe **on the EdgeQA origin** (e.g. `https://spuds0588.github.io`), not on your domain. That means:
+
+- **GitHub's own API is CORS-enabled**, so the VFS file serving and issue filing need **no allowlist** — the token-based flow works as-is.
+- **Any third-party API your app calls from the preview will see requests originating from the EdgeQA origin.** If that API enforces CORS, allowlists, or OAuth redirect URLs, add the EdgeQA origin (shown on the setup screen as `window.location.origin`) to it.
+- Local/private-network endpoints (e.g. `localhost`, a dev server on your machine) are not reachable from the sandbox unless they already allow cross-origin browser requests from the EdgeQA origin.
 
 ## Contributing
 

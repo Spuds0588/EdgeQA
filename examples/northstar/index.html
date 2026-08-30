@@ -3,138 +3,188 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Northstar — Make work flow.</title>
+<title>Northstar — Team workspace</title>
 <style>
   :root {
-    --bg: #f2f1e9;
-    --ink: #152228;
-    --muted: #68777a;
-    --brand: #173237;
-    --accent: #e87352;
-    --acid: #c9f36b;
-    --line: #d5d8cd;
-    --panel: #ffffff;
+    --bg: #f2f1e9; --ink: #152228; --muted: #68777a; --line: #d5d8cd;
+    --brand: #173237; --accent: #e87352; --acid: #c9f36b; --panel: #ffffff;
+    --soft: #e9eae2; --chip: #fbe7dc;
   }
   * { box-sizing: border-box; }
-  html { scroll-behavior: smooth; }
-  body {
-    margin: 0;
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--ink);
-    background-image: linear-gradient(#15222808 1px, transparent 1px), linear-gradient(90deg, #15222808 1px, transparent 1px);
-    background-size: 56px 56px;
-    -webkit-font-smoothing: antialiased;
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+
+  /* Top bar */
+  .topbar { height: 52px; display: flex; align-items: center; gap: 14px; padding: 0 18px; background: #f7f6f0; border-bottom: 1px solid var(--line); }
+  .topbar .brand { font-weight: 800; font-size: 15px; letter-spacing: -0.05em; display: flex; align-items: center; gap: 8px; }
+  .topbar .brand .mark { width: 20px; height: 20px; border-radius: 5px; background: var(--brand); color: var(--acid); display: grid; place-items: center; font-size: 10px; }
+  .topbar .ws { font-size: 11px; color: var(--muted); margin-right: auto; }
+  .topbar .ws b { color: var(--ink); }
+  .topbar button { font: 700 12px inherit; border-radius: 4px; padding: 8px 12px; cursor: pointer; }
+  .btn-invite { background: none; border: 1px solid #c9cec2; color: #4b5a5e; }
+  .btn-invite:hover { border-color: var(--muted); }
+  .btn-new { background: var(--acid); border: 0; color: #23312b; }
+  .btn-new:hover { background: #b9e458; }
+
+  .wrap { display: flex; height: calc(100vh - 52px); min-height: 0; }
+
+  /* Sidebar */
+  aside.side { width: 200px; flex: none; border-right: 1px solid var(--line); padding: 16px 10px; background: var(--bg); }
+  .sect-label { font: 600 9px ui-monospace, monospace; letter-spacing: 0.14em; color: #9aa49f; text-transform: uppercase; margin: 14px 10px 6px; }
+  .nav-item { display: flex; align-items: center; gap: 9px; font-size: 12px; color: #5c6b70; padding: 8px 10px; border-radius: 5px; cursor: pointer; }
+  .nav-item:hover { background: #e6e7de; }
+  .nav-item.on { background: #e2e9dd; color: #1c2b1f; font-weight: 600; }
+  .nav-item small { margin-left: auto; color: #9aa49f; font-size: 10px; }
+  .team { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 11px; color: var(--muted); }
+  .team .dot { width: 7px; height: 7px; border-radius: 50%; background: #7ad05a; margin-left: auto; }
+  .team .dot.gray { background: #c3c9c5; }
+  .ava { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 8px; font-weight: 800; color: #211817; background: var(--accent); }
+  .ava.green { background: var(--acid); color: #23312b; }
+  .ava.blue { background: #9ec9f0; color: #14283a; }
+
+  /* Board */
+  main { flex: 1; display: flex; gap: 12px; padding: 16px; min-width: 0; overflow-x: auto; }
+  .errbanner { display: none; align-items: center; gap: 9px; background: #fdeee7; border: 1px solid #f2c9b6; color: #a3431f; font-size: 12px; padding: 10px 14px; border-radius: 6px; }
+  .errbanner.on { display: flex; }
+  .errbanner b { font-weight: 700; }
+  .errbanner code { font-family: ui-monospace, monospace; font-size: 11px; background: #fbe3d8; padding: 1px 5px; border-radius: 3px; }
+  .col { flex: 1; min-width: 190px; background: var(--soft); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .col h4 { margin: 2px 4px 4px; font: 700 10px ui-monospace, monospace; letter-spacing: 0.1em; color: #7a8786; display: flex; align-items: center; gap: 7px; text-transform: uppercase; }
+  .col h4 i { font-style: normal; color: #a2acab; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 11px; box-shadow: 0 1px 2px rgba(21,34,40,.05); }
+  .card b { display: block; font-size: 12px; color: #203337; line-height: 1.4; }
+  .card small { display: block; font-size: 10px; color: #8a9592; margin-top: 5px; }
+  .card .tag { display: inline-block; font: 700 8px ui-monospace, monospace; letter-spacing: 0.06em; color: #b0542f; background: var(--chip); border-radius: 3px; padding: 2px 6px; margin-top: 7px; }
+  .card .tag.green { color: #3f7a3a; background: #e3f0dc; }
+  .card .who { float: right; width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; font-size: 7px; font-weight: 800; color: #211817; background: var(--accent); margin-top: 2px; }
+  .add-card { display: flex; align-items: center; gap: 7px; color: #8a9592; font-size: 11px; padding: 8px 6px; border-radius: 5px; cursor: pointer; }
+  .add-card:hover { background: #e1e3d9; color: var(--muted); }
+
+  /* Chat */
+  .chat { width: 280px; flex: none; border-left: 1px solid var(--line); background: #f7f6f0; display: flex; flex-direction: column; min-height: 0; }
+  .chat-head { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 9px; }
+  .chat-head .ava { width: 26px; height: 26px; font-size: 10px; }
+  .chat-head b { font-size: 12px; display: block; }
+  .chat-head small { font-size: 10px; color: #8a9592; display: block; }
+  .chat-head .live { margin-left: auto; font: 600 9px ui-monospace, monospace; color: #3f8f2f; display: flex; align-items: center; gap: 5px; }
+  .chat-head .live i { width: 6px; height: 6px; border-radius: 50%; background: #7ad05a; }
+  .msgs { flex: 1; padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; overflow-y: auto; }
+  .msg { max-width: 88%; font-size: 12px; line-height: 1.5; padding: 8px 11px; border-radius: 9px; }
+  .msg.me { align-self: flex-end; background: #dcefd2; color: #2a3b2b; }
+  .msg.them { align-self: flex-start; background: var(--panel); border: 1px solid #e3e5db; color: #4a585b; }
+  .msg b { display: block; font-size: 10px; margin-bottom: 2px; opacity: .75; }
+  .msg .time { display: block; font-size: 9px; opacity: .6; margin-top: 3px; }
+  .chat-in { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  .chat-in input { flex: 1; border: 1px solid #d9dccf; border-radius: 14px; padding: 8px 12px; font: inherit; font-size: 12px; outline: none; background: #fff; }
+  .chat-in input:focus { border-color: var(--acid); }
+  .chat-in button { background: var(--brand); color: #eaf0db; border: 0; border-radius: 12px; padding: 8px 14px; font: 700 12px inherit; cursor: pointer; }
+  .chat-in button:hover { background: #214448; }
+
+  footer.hint { padding: 8px 18px; font-size: 10px; color: #9aa49f; border-top: 1px solid var(--line); background: #f7f6f0; }
+  footer.hint code { font-family: ui-monospace, monospace; background: #eceee6; padding: 1px 5px; border-radius: 3px; }
+
+  @media (max-width: 860px) {
+    aside.side { display: none; }
+    .chat { width: 240px; }
+    main { padding: 12px; }
+    .topbar { gap: 8px; padding: 0 10px; }
+    .topbar .ws { display: none; }
+    .btn-new, .btn-invite { padding: 7px 9px; font-size: 11px; }
   }
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px; }
-
-  /* Nav */
-  nav {
-    display: flex; align-items: center; gap: 28px;
-    padding: 26px 0;
-  }
-  nav .brand { font-weight: 800; font-size: 17px; letter-spacing: -0.05em; margin-right: auto; display: flex; align-items: center; gap: 9px; }
-  nav .brand .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--brand); color: var(--acid); display: grid; place-items: center; font-size: 11px; }
-  nav a { color: var(--muted); text-decoration: none; font-size: 13px; }
-  nav a:hover { color: var(--ink); }
-  nav button {
-    background: var(--brand); color: #eaf0db; border: 0; border-radius: 4px;
-    padding: 10px 16px; font: 700 13px inherit; cursor: pointer;
-  }
-  nav button:hover { background: #214448; }
-
-  /* Hero */
-  header.hero { padding: 92px 0 70px; }
-  .kicker { font: 600 11px ui-monospace, monospace; letter-spacing: 0.14em; color: var(--muted); text-transform: uppercase; }
-  h1 { font-size: clamp(52px, 8vw, 84px); line-height: 0.98; letter-spacing: -0.08em; margin: 22px 0 24px; font-weight: 800; }
-  h1 strong { color: var(--accent); font-weight: 800; }
-  .lead { max-width: 520px; color: var(--muted); font-size: 17px; line-height: 1.7; margin: 0; }
-  .cta-row { display: flex; gap: 14px; margin-top: 36px; flex-wrap: wrap; }
-  .btn { display: inline-flex; align-items: center; gap: 8px; border-radius: 4px; padding: 13px 20px; font: 800 14px inherit; text-decoration: none; cursor: pointer; }
-  .btn.primary { background: var(--acid); color: #23312b; border: 0; }
-  .btn.primary:hover { background: #b9e458; }
-  .btn.ghost { background: none; border: 1px solid var(--line); color: var(--ink); }
-  .btn.ghost:hover { border-color: var(--muted); }
-  .stats { display: flex; gap: 56px; border-top: 1px solid var(--line); margin-top: 74px; padding-top: 26px; color: var(--muted); font-size: 13px; flex-wrap: wrap; }
-  .stats b { display: block; font-size: 26px; color: var(--ink); letter-spacing: -0.04em; margin-bottom: 4px; }
-
-  /* Sections */
-  section { padding: 84px 0; }
-  .sec-label { font: 600 11px ui-monospace, monospace; letter-spacing: 0.14em; color: var(--accent); text-transform: uppercase; }
-  h2 { font-size: 40px; letter-spacing: -0.06em; line-height: 1.06; margin: 14px 0 44px; }
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 28px; }
-  .card .ico { width: 34px; height: 34px; border-radius: 8px; background: #e8efe4; color: var(--brand); display: grid; place-items: center; font-size: 16px; margin-bottom: 22px; }
-  .card h3 { font-size: 16px; margin: 0 0 8px; }
-  .card p { color: var(--muted); font-size: 13px; line-height: 1.65; margin: 0; }
-
-  .band {
-    background: var(--brand); color: #eaf0db; border-radius: 14px;
-    padding: 54px 56px; display: flex; align-items: center; justify-content: space-between; gap: 30px; flex-wrap: wrap;
-  }
-  .band h2 { color: #fff; margin: 10px 0 0; }
-  .band p { color: #9fb0b2; font-size: 14px; margin: 0; }
-
-  footer { border-top: 1px solid var(--line); padding: 26px 0 44px; display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; flex-wrap: wrap; gap: 10px; }
-  footer b { color: var(--ink); }
-
-  @media (max-width: 720px) {
-    .grid { grid-template-columns: 1fr; }
-    header.hero { padding-top: 64px; }
-    .stats { gap: 32px; }
-    .band { padding: 36px 26px; }
-    nav { gap: 18px; flex-wrap: wrap; }
-    nav a { display: none; }
+  @media (max-width: 480px) {
+    .wrap { flex-direction: column; height: auto; min-height: calc(100vh - 52px); }
+    main { overflow-x: auto; }
+    .chat { width: 100%; border-left: 0; border-top: 1px solid var(--line); min-height: 250px; }
+    .topbar .brand { font-size: 13px; }
   }
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <nav>
-      <span class="brand"><span class="mark">✦</span> Northstar</span>
-      <a href="#features">Changelog</a><a href="#features">Docs</a><a href="#features">Pricing</a>
-      <button>Get started ↗</button>
-    </nav>
-
-    <header class="hero">
-      <div class="kicker">The operating system for modern teams</div>
-      <h1>Make work<br /><strong>flow.</strong></h1>
-      <p class="lead">One calm space for your team's best thinking, building, and shipping. Northstar replaces the scramble of tabs, tools, and notifications with a single focused place to get things done.</p>
-      <div class="cta-row">
-        <a class="btn primary" href="#features">Explore Northstar →</a>
-        <a class="btn ghost" href="#features">Talk to us</a>
-      </div>
-      <div class="stats">
-        <span><b>42k</b> teams in motion</span>
-        <span><b>99.9%</b> less busywork</span>
-        <span><b>4.9★</b> across 12,000 reviews</span>
-      </div>
-    </header>
-
-    <section id="features">
-      <div class="sec-label">Why Northstar</div>
-      <h2>Everything your team needs.<br />Nothing it doesn't.</h2>
-      <div class="grid">
-        <div class="card"><div class="ico">◐</div><h3>Calm by default</h3><p>Notifications are grouped, batched, and quietly handled — so deep work stays deep.</p></div>
-        <div class="card"><div class="ico">➤</div><h3>Decisions in motion</h3><p>Docs, plans, and feedback live next to the work, with decisions captured as they happen.</p></div>
-        <div class="card"><div class="ico">◈</div><h3>One home for work</h3><p>Your roadmap, releases, and team pulse in a single view. No more tab archaeology.</p></div>
-      </div>
-    </section>
-
-    <div class="band">
-      <div>
-        <div class="sec-label">Northstar</div>
-        <h2>Make your next quarter<br />flow.</h2>
-        <p>Free for teams up to 10. No credit card required.</p>
-      </div>
-      <a class="btn primary" href="#features">Start free →</a>
-    </div>
-
-    <footer>
-      <span><b>Northstar</b> © 2026</span>
-      <span>Made for teams who ship.</span>
-      <span>This page is a static demo — no backend, no cookies.</span>
-    </footer>
+  <div class="topbar">
+    <div class="brand"><span class="mark">✦</span> Northstar</div>
+    <div class="ws">Acme Studio / <b>Website Redesign</b></div>
+    <button class="btn-invite" id="invite">＋ Invite teammate</button>
+    <button class="btn-new" id="newtask">＋ New task</button>
   </div>
+
+  <div class="wrap">
+    <aside class="side">
+      <div class="sect-label">Workspace</div>
+      <div class="nav-item on">◐ Board</div>
+      <div class="nav-item">➤ Chat <small>12</small></div>
+      <div class="nav-item">◈ Reports</div>
+      <div class="nav-item">⚙ Settings</div>
+      <div class="sect-label">Team</div>
+      <div class="team"><span class="ava green">JD</span> Jade <span class="dot"></span></div>
+      <div class="team"><span class="ava blue">AB</span> Alex <span class="dot"></span></div>
+      <div class="team"><span class="ava">SP</span> Sam <span class="dot gray"></span></div>
+    </aside>
+
+    <main>
+      <div class="errbanner" id="errbanner"><b>⚠ Task creation failed</b> — the server returned <code>500</code>. Please try again in a moment.</div>
+      <section class="col">
+        <h4>To do <i>3</i></h4>
+        <div class="card"><span class="who">AB</span><b>Write pricing page copy</b><small>Due Fri · 2 subtasks</small><span class="tag">Copy</span></div>
+        <div class="card"><span class="who">SP</span><b>Collect customer testimonials</b><small>Needs 3 more</small><span class="tag green">Research</span></div>
+        <div class="card"><span class="who">JD</span><b>Design empty-state illustration</b><small>Awaiting brand assets</small><span class="tag">Design</span></div>
+        <div class="add-card">＋ Add task</div>
+      </section>
+      <section class="col">
+        <h4>In progress <i>2</i></h4>
+        <div class="card"><span class="who">JD</span><b>Build hero section</b><small>60% · blocked on copy</small><span class="tag">Design</span></div>
+        <div class="card"><span class="who">AB</span><b>Checkout flow implementation</b><small>In review</small><span class="tag green">Dev</span></div>
+        <div class="add-card">＋ Add task</div>
+      </section>
+      <section class="col">
+        <h4>Done <i>2</i></h4>
+        <div class="card"><b>Set up analytics</b><small>Shipped Tue</small><span class="tag green">Dev</span></div>
+        <div class="card"><b>Navigation IA</b><small>Approved</small><span class="tag">Design</span></div>
+        <div class="add-card">＋ Add task</div>
+      </section>
+    </main>
+
+    <section class="chat">
+      <div class="chat-head"><span class="ava green">JD</span><div><b># redesign</b><small>Jade, Alex, Sam</small></div><span class="live"><i></i>3 online</span></div>
+      <div class="msgs" id="msgs">
+        <div class="msg them"><b>Alex</b>Hero copy is in — pushing it to the branch now.<span class="time">10:42</span></div>
+        <div class="msg me"><b>You</b>Great, I'll review before standup.<span class="time">10:44</span></div>
+        <div class="msg them"><b>Jade</b>New task button still errors for me — anyone else?<span class="time">10:47</span></div>
+      </div>
+      <div class="chat-in"><input id="msg" placeholder="Message #redesign…" /><button id="send">Send</button></div>
+    </section>
+  </div>
+
+  <footer class="hint">Static demo workspace — data is fake and local to this page. Try <b>＋ New task</b> and <b>＋ Invite teammate</b>.</footer>
+
+<script>
+  // Demo app: a realistic team workspace with two intentional bugs for testers to find.
+  // Bug 1: New task always fails with a 500 (visible error + console line).
+  // Bug 2: Invite teammate silently does nothing (no feedback at all).
+  const banner = document.getElementById("errbanner");
+  document.getElementById("newtask").addEventListener("click", () => {
+    banner.classList.add("on");
+    console.error("[northstar] POST /api/tasks 500 — could not create task (checkout flow blocked)");
+    setTimeout(() => banner.classList.remove("on"), 6000);
+  });
+  document.getElementById("invite").addEventListener("click", () => {
+    // Intentional silent no-op — the button gives no feedback (known bug).
+  });
+
+  // Chat actually works, so the app feels alive around the bugs.
+  const msgs = document.getElementById("msgs");
+  const input = document.getElementById("msg");
+  const send = () => {
+    const text = input.value.trim();
+    if (!text) return;
+    const el = document.createElement("div");
+    el.className = "msg me";
+    const now = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    el.innerHTML = "<b>You</b>" + text.replace(/</g, "&lt;") + '<span class="time">' + now + "</span>";
+    msgs.appendChild(el);
+    input.value = "";
+    msgs.scrollTop = msgs.scrollHeight;
+  };
+  document.getElementById("send").addEventListener("click", send);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+</script>
 </body>
 </html>

@@ -9,10 +9,10 @@
 // video/GIF later without touching the rest of the app.
 
 const CYCLE = 17000; // one full animation loop, ms
-const TITLE = "Broken nav on mobile";
-const BODY = "Nav links overlap and the CTA is cut off at mobile widths.";
-const TITLE2 = "Checkout button unresponsive";
-const BODY2 = "Tapping Checkout does nothing at 390px viewport.";
+const TITLE = "New task fails with 500";
+const BODY = "Clicking 'New task' shows the error banner and the task never appears. Reproducible every time.";
+const TITLE2 = "New task 500 on mobile";
+const BODY2 = "Same failure on the phone — error banner shows, task never created.";
 const EASE = (p) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
 // cursor movement segments: [start, end, target selector]
 const SEG = [
@@ -55,19 +55,44 @@ const CSS = `
 .foot b { font-size:9.5px; font-weight:600; display:block; }
 .foot small { color:#5c6c73; }
 .ava { flex:none; width:24px; height:24px; display:grid; place-items:center; background:#ff805f; color:#211817; border-radius:50%; font-size:9px; font-weight:800; }
-.site { flex:1; background:#f2f1e9; color:#152228; display:flex; flex-direction:column; }
-.site nav { height:52px; flex:none; display:flex; align-items:center; gap:20px; padding:0 28px; font-size:9px; color:#526066; }
-.site nav b { font-size:14px; color:#18292c; margin-right:auto; letter-spacing:-.06em; }
-.site nav span { color:#6d7b80; }
-.site nav button { background:#173237; color:#eaf0db; padding:8px 13px; border-radius:3px; font:800 9px system-ui,sans-serif; cursor:pointer; }
-.hero { position:relative; flex:1; padding:48px 0 36px 12%; overflow:hidden; }
-.kicker { color:#778785; font:500 8px ui-monospace,'DM Mono',monospace; letter-spacing:.12em; }
-.hero h2 { font-size:52px; line-height:.96; letter-spacing:-.09em; margin:14px 0; color:#1b3338; }
-.hero h2 strong { color:#e87352; }
-.hero p { color:#68777a; font-size:9.5px; max-width:210px; line-height:1.6; }
-.hero button { margin-top:16px; display:inline-flex; align-items:center; gap:7px; background:#c9f36b; color:#23312b; padding:10px 13px; font:800 9px system-ui,sans-serif; border-radius:0; cursor:pointer; }
-.stats { display:flex; gap:38px; border-top:1px solid #d5d8cd; margin:0 10%; padding-top:13px; color:#84918e; font-size:8px; }
-.stats b { font-size:14px; color:#203337; display:block; }
+.site { flex:1; background:#f2f1e9; color:#152228; display:flex; flex-direction:column; min-width:0; }
+.sitebar { height:42px; flex:none; display:flex; align-items:center; gap:10px; padding:0 12px; border-bottom:1px solid #dde0d4; background:#f7f6f0; }
+.sitebar b { font-size:11px; color:#18292c; letter-spacing:-.05em; display:flex; align-items:center; gap:6px; }
+.sitebar .ws { font-size:8px; color:#6d7b80; margin-right:auto; }
+.sitebar .ws b { color:#18292c; }
+.sitebar button { font:800 8px system-ui,sans-serif; border-radius:3px; padding:6px 9px; cursor:pointer; }
+.sitebar .invite { background:none; border:1px solid #c9cec2; color:#4b5a5e; }
+.sitebar .newtask { background:#c9f36b; border:0; color:#23312b; }
+.workspace { position:relative; flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+.wrow { flex:1; display:flex; min-height:0; }
+.errbanner { display:none; align-items:center; gap:6px; margin:8px 10px 0; background:#fdeee7; border:1px solid #f2c9b6; color:#a3431f; font-size:7.5px; padding:6px 9px; border-radius:5px; }
+.errbanner.on { display:flex; }
+.mnav { width:100px; flex:none; border-right:1px solid #dde0d4; padding:9px 6px; background:#f2f1e9; }
+.mnav .sect { font:600 6px ui-monospace,'DM Mono',monospace; letter-spacing:.12em; color:#9aa49f; margin:8px 8px 3px; }
+.mnav .mitem { font-size:8px; color:#5c6b70; padding:5px 7px; border-radius:4px; display:flex; align-items:center; gap:6px; }
+.mnav .mitem.on { background:#e2e9dd; color:#1c2b1f; font-weight:600; }
+.mnav .mava { width:12px; height:12px; border-radius:50%; display:inline-grid; place-items:center; font-size:5.5px; font-weight:800; color:#211817; background:var(--qa-acid); }
+.board { flex:1; display:flex; gap:8px; padding:10px; min-width:0; }
+.col { flex:1; min-width:0; background:#e9eae2; border-radius:6px; padding:8px; display:flex; flex-direction:column; gap:6px; }
+.col h4 { font:700 6.5px ui-monospace,'DM Mono',monospace; letter-spacing:.09em; color:#7a8786; margin:1px 3px 3px; text-transform:uppercase; }
+.card { background:#fff; border:1px solid #dde0d4; border-radius:5px; padding:7px 8px; box-shadow:0 1px 2px rgba(21,34,40,.05); }
+.card b { display:block; font-size:7.5px; color:#203337; line-height:1.35; }
+.card small { display:block; font-size:6px; color:#8a9592; margin-top:3px; }
+.card .tag { display:inline-block; font:700 5.5px ui-monospace,'DM Mono',monospace; letter-spacing:.05em; color:#b0542f; background:#fbe7dc; border-radius:2px; padding:1px 4px; margin-top:4px; }
+.card .who { float:right; width:12px; height:12px; border-radius:50%; display:grid; place-items:center; font-size:5.5px; font-weight:800; color:#211817; background:#ff805f; margin-top:1px; }
+.chatpane { width:168px; flex:none; border-left:1px solid #dde0d4; background:#f7f6f0; display:flex; flex-direction:column; min-height:0; }
+.chead { padding:8px 10px; border-bottom:1px solid #dde0d4; display:flex; align-items:center; gap:7px; }
+.chead b { font-size:8.5px; color:#203337; display:block; }
+.chead small { font-size:6.5px; color:#8a9592; }
+.chead .live { margin-left:auto; font:600 6.5px ui-monospace,'DM Mono',monospace; color:#3f8f2f; }
+.cmsgs { flex:1; padding:8px 10px; display:flex; flex-direction:column; gap:6px; overflow:hidden; }
+.cmsg { max-width:90%; font-size:7.5px; line-height:1.4; padding:5px 8px; border-radius:6px; }
+.cmsg.me { align-self:flex-end; background:#dcefd2; color:#2a3b2b; }
+.cmsg.them { align-self:flex-start; background:#fff; border:1px solid #e3e5db; color:#4a585b; }
+.cmsg b { display:block; font-size:6px; opacity:.75; }
+.cin { display:flex; gap:5px; padding:7px 10px; border-top:1px solid #dde0d4; }
+.cin span { flex:1; background:#fff; border:1px solid #d9dccf; border-radius:10px; padding:4px 8px; font-size:7px; color:#9aa49f; }
+.cin button { background:#173237; color:#eaf0db; border:0; border-radius:9px; padding:5px 8px; font:800 7px system-ui,sans-serif; }
 .snap { position:absolute; inset:0; border:2px solid rgba(201,243,107,0); pointer-events:none; transition:border-color .3s; }
 .legend { position:absolute; left:16px; top:12px; font:600 8px ui-monospace,'DM Mono',monospace; letter-spacing:.14em; color:var(--qa-dim); z-index:6; }
 /* scene wrappers */
@@ -126,12 +151,18 @@ const CSS = `
 .pnav b { font-size:11px; color:#18292c; margin-right:auto; letter-spacing:-.06em; }
 .plive { display:flex; align-items:center; gap:4px; font:600 6px ui-monospace,'DM Mono',monospace; color:#3f8f2f; }
 .plive i { width:5px; height:5px; border-radius:50%; background:#7ad05a; animation:beat 1.6s infinite; }
-.pher { padding:20px 16px 0; position:relative; flex:1; }
-.pher .kicker { font:500 5.5px ui-monospace,'DM Mono',monospace; letter-spacing:.1em; color:#778785; }
-.pher h2 { font-size:22px; line-height:.95; letter-spacing:-.08em; margin:8px 0; color:#1b3338; }
-.pher h2 strong { color:#e87352; }
-.pher p { font-size:6.5px; color:#68777a; line-height:1.5; max-width:150px; }
-.pher button { margin-top:10px; background:#c9f36b; color:#23312b; padding:7px 10px; font:800 7px system-ui,sans-serif; border-radius:4px; }
+.pher { padding:8px; position:relative; flex:1; display:flex; flex-direction:column; gap:7px; min-height:0; }
+.pmini { display:flex; gap:6px; flex:1; min-height:0; }
+.pcol { flex:1; background:#e9eae2; border-radius:5px; padding:6px; display:flex; flex-direction:column; gap:5px; }
+.pcol h4 { font:700 5.5px ui-monospace,'DM Mono',monospace; letter-spacing:.08em; color:#7a8786; margin:0 2px 3px; text-transform:uppercase; }
+.pcard { background:#fff; border:1px solid #dde0d4; border-radius:4px; padding:5px 6px; }
+.pcard b { display:block; font-size:6px; color:#203337; line-height:1.3; }
+.pcard small { display:block; font-size:5px; color:#8a9592; margin-top:2px; }
+.pchat { flex:none; background:#f7f6f0; border:1px solid #dde0d4; border-radius:6px; padding:6px 7px; }
+.pchat b { font-size:6px; color:#203337; display:block; margin-bottom:3px; }
+.pchat .pm { font-size:5.5px; color:#4a585b; background:#fff; border:1px solid #e3e5db; border-radius:4px; padding:3px 5px; margin-bottom:3px; line-height:1.35; }
+.pchat .pm.me { background:#dcefd2; color:#2a3b2b; }
+.pchat .pnew { display:block; margin-top:4px; background:#c9f36b; color:#23312b; text-align:center; font:800 6px system-ui,sans-serif; padding:4px; border-radius:3px; }
 .ppill { position:absolute; right:10px; bottom:10px; background:#132a2e; color:var(--qa-acid); font-size:7.5px; font-weight:600; padding:7px 9px; border-radius:5px; box-shadow:0 5px 14px rgba(0,0,0,.3); transition:transform .15s; z-index:3; }
 .ppill.pop { transform:scale(1.12); }
 .psheet { position:absolute; left:6px; right:6px; bottom:6px; background:#0f181e; border:1px solid #2a3941; border-radius:12px; padding:10px; transform:translateY(115%); transition:transform .3s ease; z-index:4; }
@@ -167,9 +198,22 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
         <div class="foot"><div class="ava">JD</div><span><b>QA session</b><small>Token in memory</small></span></div>
       </aside>
       <div class="site">
-        <nav><b>Northstar</b><span>Changelog</span><span>Docs</span><span>Pricing</span><button>Get started ↗</button></nav>
-        <div class="hero"><div class="snap" id="snap"></div><div class="kicker">THE OPERATING SYSTEM FOR MODERN TEAMS</div><h2>Make work<br /><strong>flow.</strong></h2><p>One calm space for your team's best thinking, building, and shipping.</p><button>Explore Northstar →</button></div>
-        <div class="stats"><span><b>42k</b> teams in motion</span><span><b>99.9%</b> less busywork</span></div>
+        <div class="sitebar"><b>✦ Northstar</b><span class="ws">Acme Studio / <b>Website Redesign</b></span><button class="invite">＋ Invite</button><button class="newtask">＋ New task</button></div>
+        <div class="workspace"><div class="snap" id="snap"></div><div class="errbanner" id="eBanner">⚠ Task creation failed — <b>server 500</b></div>
+          <div class="wrow">
+            <div class="mnav"><div class="sect">WORKSPACE</div><div class="mitem on">◐ Board</div><div class="mitem">➤ Chat</div><div class="mitem">◈ Reports</div><div class="sect">TEAM</div><div class="mitem"><span class="mava">JD</span>Jade</div><div class="mitem"><span class="mava">AB</span>Alex</div></div>
+            <div class="board">
+              <div class="col"><h4>To do <i>3</i></h4><div class="card"><span class="who">AB</span><b>Write pricing copy</b><small>Due Fri</small><span class="tag">Copy</span></div><div class="card"><span class="who">SP</span><b>Collect testimonials</b><small>Needs 3 more</small></div></div>
+              <div class="col"><h4>In progress <i>2</i></h4><div class="card"><span class="who">JD</span><b>Build hero section</b><small>60% · blocked</small><span class="tag">Design</span></div><div class="card"><span class="who">AB</span><b>Checkout flow impl</b><small>In review</small></div></div>
+              <div class="col"><h4>Done <i>2</i></h4><div class="card"><b>Set up analytics</b><small>Shipped Tue</small></div><div class="card"><b>Navigation IA</b><small>Approved</small></div></div>
+            </div>
+            <div class="chatpane">
+              <div class="chead"><b># redesign</b><small>3 online</small><span class="live">● LIVE</span></div>
+              <div class="cmsgs"><div class="cmsg them"><b>Alex</b>Hero copy is in — pushing now.</div><div class="cmsg me"><b>You</b>Great, I'll review.</div><div class="cmsg them"><b>Jade</b>New task button still errors for me 😕</div></div>
+              <div class="cin"><span>Message #redesign…</span><button>Send</button></div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -202,7 +246,13 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
       <div class="pstatus"><span>9:41</span><span>◉ ▮ ▯▯ ▯▯</span></div>
       <div class="psite">
         <div class="pnav"><b>Northstar</b><span class="plive"><i></i>LIVE</span></div>
-        <div class="pher"><span class="kicker">THE OPERATING SYSTEM FOR MODERN TEAMS</span><h2>Make work <strong>flow.</strong></h2><p>One calm space for your team's best thinking, building, and shipping.</p><button>Explore →</button></div>
+        <div class="pher">
+          <div class="pmini">
+            <div class="pcol"><h4>To do</h4><div class="pcard"><b>Write pricing copy</b><small>Due Fri</small></div><div class="pcard"><b>Collect testimonials</b><small>Needs 3</small></div></div>
+            <div class="pcol"><h4>Doing</h4><div class="pcard"><b>Build hero section</b><small>60% blocked</small></div><div class="pcard"><b>Checkout flow</b><small>In review</small></div></div>
+          </div>
+          <div class="pchat"><b># redesign</b><div class="pm them">New task button still errors for me 😕</div><div class="pnew">＋ New task</div></div>
+        </div>
         <div class="ppill" id="p3Pill"><svg class="bug" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg> Report</div>
         <aside class="psheet" id="p3Sheet">
           <div class="psheet-head"><b>Report a bug</b><span>×</span></div>
@@ -304,6 +354,7 @@ export default class EdgeQaDemo extends HTMLElement {
       $("#drawer").classList.toggle("open", t >= 5200 && t < 9200);
       $("#dSubmit").classList.toggle("pop", t >= 9000 && t < 9200);
       $("#snap").style.borderColor = t >= 5200 && t < 9800 ? "rgba(201,243,107,.4)" : "transparent";
+      $("#eBanner").classList.toggle("on", t >= 4700 && t < 9200);
       if (t >= 6100 && t < 7000) type($("#dTitle"), TITLE, 6100, 7000);
       if (t >= 7700 && t < 8600) type($("#dBody"), BODY, 7700, 8600);
       if (t < 5200) { $("#dTitle").value = ""; $("#dBody").value = ""; }
