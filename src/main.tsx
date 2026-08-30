@@ -4,6 +4,8 @@ import { ArrowRight, Bug, Check, ChevronDown, Clipboard, GitBranch, KeyRound, Li
 import "./index.css";
 import "./demo-element";
 import { parseRepoInput } from "./lib/repo";
+import type { Candidate } from "./lib/discover";
+import { loadBranches, loadIdentity, probeRepo } from "./lib/discover";
 
 type Mode = "home" | "setup" | "unlock" | "viewer";
 
@@ -54,10 +56,17 @@ async function makePayload(token: string, pin: string) {
   return `${bytesToBase64(salt)}.${bytesToBase64(iv)}.${bytesToBase64(new Uint8Array(encrypted))}`;
 }
 
+// Build a magic link from the app's real base (origin + path), not the bare
+// origin — so links keep the /EdgeQA/ subpath GitHub Pages serves them under.
+const appBaseHref = () => { const h = window.location.href.split("#")[0]; return h.endsWith("/") ? h : h + "/"; };
+
+
 // Saved QA links. Only the PIN-encrypted payload is stored — never the token,
 // never the PIN. The ciphertext is the same material that already lives in the
 // shared URL, so local persistence adds convenience without a new secret.
-type SavedLink = { id: string; name: string; owner: string; repo: string; branch: string; payload: string; createdAt: number };
+type SavedLink = { id: string; name: string; owner: string; repo: string; branch: string; path: string; payload: string; createdAt: number };
+// Legacy backups won't carry `path`; normalize so openSaved never sees undefined.
+const normLink = (l: any): SavedLink => ({ ...l, path: l.path || "" });
 const SAVED_KEY = "edgeqa.savedLinks.v1";
 const loadSaved = (): SavedLink[] => {
   try { const raw = localStorage.getItem(SAVED_KEY); if (!raw) return []; const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed.filter((l) => l && typeof l.payload === "string" && typeof l.repo === "string") : []; } catch { return []; }
@@ -81,8 +90,18 @@ function App() {
   const [copied, setCopied] = useState(false);
   const [unlockPin, setUnlockPin] = useState("");
   const [error, setError] = useState("");
+  const [siteRoot, setSiteRoot] = useState("");
+  const [repoWarn, setRepoWarn] = useState("");
+  const [account, setAccount] = useState("");
+  const [repos, setRepos] = useState<{ full_name: string; private: boolean; default_branch: string }[]>([]);
+  const [branches, setBranches] = useState<string[]>([]);
+  const [sources, setSources] = useState<Candidate[]>([]);
+  const [siteChosen, setSiteChosen] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState("");
+  const connectTimer = useRef<number | undefined>(undefined);
   const [savedLinks, setSavedLinks] = useState<SavedLink[]>(loadSaved);
-  const [savePrompt, setSavePrompt] = useState<{ owner: string; repo: string; branch: string; payload: string } | null>(null);
+  const [savePrompt, setSavePrompt] = useState<{ owner: string; repo: string; branch: string; path: string; payload: string } | null>(null);
   const [saveName, setSaveName] = useState("");
   const [savedFlash, setSavedFlash] = useState("");
 
@@ -92,7 +111,7 @@ function App() {
     if (!hash.get("repo") && !hasDemo) return;
     const [parsedOwner, parsedRepo] = decodeURIComponent(hash.get("repo") || `${DEMO.owner}/${DEMO.repo}`).split("/");
     setOwner(parsedOwner || DEMO.owner); setRepo(parsedRepo || DEMO.repo); setBranch(hash.get("branch") || DEMO.branch); setDemoPath(hash.get("path") || (hasDemo ? DEMO.path : "")); setReadonly(hash.has("readonly"));
-    setMode(hash.get("payload") ? "unlock" : hasDemo ? "viewer" : "setup");
+    setMode(hash.get("payload") ? "unlock" : hasDemo || hash.has("public") ? "viewer" : "setup");
   }, []);
 
   const openDemo = () => { setOwner(DEMO.owner); setRepo(DEMO.repo); setBranch(DEMO.branch); setDemoPath(DEMO.path); setMode("viewer"); };
@@ -100,27 +119,40 @@ function App() {
   const repoLabel = useMemo(() => owner && repo ? `${owner}/${repo}` : "your private repository", [owner, repo]);
 
   const generate = async () => {
-    setError("");
-    if (!owner || !repo || !token || pin.length < 6) { setError("Add a repository, token, and a PIN of at least 6 characters."); return; }
-    const payload = await makePayload(token, pin);
-    const value = `${window.location.origin}/#repo=${encodeURIComponent(`${owner}/${repo}`)}&branch=${encodeURIComponent(branch)}&payload=${encodeURIComponent(payload)}`;
+    setError(""); setRepoWarn("");
+    if (!owner || !repo || pin.length < 6) { setError("Add a repository and a PIN of at least 6 characters."); return; }
+    const probe = await probeRepo(owner, repo, branch, token);
+    if (!token && probe.public === false) { setError("This repo needs a token to preview — private repositories require a GitHub access token. Public repos work without one."); return; }
+    const resolvedBranch = probe.branch;
+    if (resolvedBranch !== branch) setBranch(resolvedBranch);
+    const root = siteChosen ? siteRoot : probe.siteRoot;
+    setSiteRoot(root); setDemoPath(root);
+    const pathPart = root ? `&path=${encodeURIComponent(root)}` : "";
+    if (!probe.sources.length) {
+      setRepoWarn(probe.defaultBranch && probe.defaultBranch !== resolvedBranch
+        ? `No web page found on \`${resolvedBranch}\`. This repo's default branch is \`${probe.defaultBranch}\` — EdgeQA previews web apps.`
+        : `No index.html found on \`${resolvedBranch}\` — this doesn't look like it has a web app to preview.`);
+    }
+    const payload = token ? await makePayload(token, pin) : "";
+    const flags = token ? "" : "&public";
+    const value = `${appBaseHref()}#repo=${encodeURIComponent(`${owner}/${repo}`)}&branch=${encodeURIComponent(resolvedBranch)}${pathPart}${flags}${payload ? `&payload=${encodeURIComponent(payload)}` : ""}`;
     setLink(value);
     // keep the token in memory for this tab so "Open preview" and issue filing work; it still never touches a server or localStorage
-    // ask on each generation: saving is always explicit, never automatic
-    setSavePrompt({ owner, repo, branch, payload });
-    setSaveName(`${owner}/${repo} · ${branch}`);
+    // ask on each generation: saving is always explicit, never automatic; a tokenless public link has no secret to save
+    setSavePrompt(token ? { owner, repo, branch: resolvedBranch, path: root, payload } : null);
+    setSaveName(`${owner}/${repo} · ${resolvedBranch}`);
   };
   const weakPin = pin.length < 8 || /^\d+$/.test(pin);
-  const savedLinkUrl = (l: SavedLink) => `${window.location.origin}/#repo=${encodeURIComponent(`${l.owner}/${l.repo}`)}&branch=${encodeURIComponent(l.branch)}&payload=${encodeURIComponent(l.payload)}`;
+  const savedLinkUrl = (l: SavedLink) => `${appBaseHref()}#repo=${encodeURIComponent(`${l.owner}/${l.repo}`)}&branch=${encodeURIComponent(l.branch)}${l.path ? `&path=${encodeURIComponent(l.path)}` : ""}&payload=${encodeURIComponent(l.payload)}`;
   const saveLink = () => {
     if (!savePrompt) return;
-    const entry: SavedLink = { id: crypto.randomUUID?.() || String(Date.now()), name: saveName.trim() || `${savePrompt.owner}/${savePrompt.repo} · ${savePrompt.branch}`, owner: savePrompt.owner, repo: savePrompt.repo, branch: savePrompt.branch, payload: savePrompt.payload, createdAt: Date.now() };
+    const entry: SavedLink = { id: crypto.randomUUID?.() || String(Date.now()), name: saveName.trim() || `${savePrompt.owner}/${savePrompt.repo} · ${savePrompt.branch}`, owner: savePrompt.owner, repo: savePrompt.repo, branch: savePrompt.branch, path: savePrompt.path || "", payload: savePrompt.payload, createdAt: Date.now() };
     const next = [entry, ...savedLinks];
     setSavedLinks(next); persistSaved(next); setSavePrompt(null); setSavedFlash("Saved ✓"); setTimeout(() => setSavedFlash(""), 2200);
   };
   const removeSaved = (id: string) => { const next = savedLinks.filter((l) => l.id !== id); setSavedLinks(next); persistSaved(next); };
   const clearSaved = () => { setSavedLinks([]); persistSaved([]); };
-  const openSaved = (l: SavedLink) => { window.location.hash = savedLinkUrl(l).split("#")[1]; setOwner(l.owner); setRepo(l.repo); setBranch(l.branch); setDemoPath(""); setReadonly(false); setMode("unlock"); };
+  const openSaved = (l: SavedLink) => { window.location.hash = savedLinkUrl(l).split("#")[1]; setOwner(l.owner); setRepo(l.repo); setBranch(l.branch); setDemoPath(l.path || ""); setReadonly(false); setMode("unlock"); };
   const copySaved = async (l: SavedLink) => { await navigator.clipboard?.writeText(savedLinkUrl(l)); setSavedFlash(`Copied ${l.name}`); setTimeout(() => setSavedFlash(""), 2200); };
   const exportBackup = () => {
     const blob = new Blob([JSON.stringify({ app: "edgeqa", version: 1, exportedAt: new Date().toISOString(), links: savedLinks }, null, 2)], { type: "application/json" });
@@ -133,7 +165,7 @@ function App() {
         const parsed = JSON.parse(String(reader.result));
         const incoming = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.links) ? parsed.links : [];
         const valid = incoming.filter((l: any) => l && typeof l.payload === "string" && typeof l.owner === "string" && typeof l.repo === "string" && typeof l.branch === "string");
-        const byId = new Map<string, SavedLink>(); savedLinks.forEach((l) => byId.set(l.id, l)); valid.forEach((l: SavedLink) => byId.set(l.id, l));
+        const byId = new Map<string, SavedLink>(); savedLinks.forEach((l) => byId.set(l.id, l));        valid.forEach((l: any) => byId.set(l.id, normLink(l)));
         const next = [...byId.values()];
         setSavedLinks(next); persistSaved(next); setSavedFlash(`Imported ${valid.length} link${valid.length === 1 ? "" : "s"} ✓`); setTimeout(() => setSavedFlash(""), 2600);
       } catch { setError("That file doesn't look like a valid EdgeQA backup."); }
@@ -146,6 +178,42 @@ function App() {
     const parsed = parseRepoInput(value);
     if (parsed) { setOwner(parsed.owner); setRepo(parsed.repo); setBranch(parsed.branch); }
   };
+
+  // Token-first flow (token → repo → branch → root HTML). Confirms access before the
+  // link is made and prevents miskeyed repo strings for private repos.
+  const onTokenChange = (value: string) => {
+    setToken(value);
+    window.clearTimeout(connectTimer.current);
+    if (/^github_pat_/.test(value.trim()) && value.trim().length >= 12) {
+      connectTimer.current = window.setTimeout(() => { void connect(value.trim()); }, 450);
+    }
+  };
+  const connect = async (tok: string) => {
+    setConnecting(true); setConnectError("");
+    try {
+      const identity = await loadIdentity(tok);
+      setAccount(identity.account); setRepos(identity.repos);
+    } catch { setConnectError("Couldn't connect — check the token and that it can read the repo (fine-grained: Contents Read)."); }
+    finally { setConnecting(false); }
+  };
+  const pickRepo = async (full: string) => {
+    if (!full) return;
+    const meta = repos.find((r) => r.full_name === full);
+    const [o, r] = full.split("/");
+    setOwner(o); setRepo(r); setBranches([]); setSources([]); setSiteRoot(""); setSiteChosen(false); setError(""); setRepoWarn("");
+    const list = await loadBranches(o, r, token);
+    setBranches(list);
+    setBranch(meta?.default_branch || (list.includes("main") ? "main" : list[0] || "main"));
+  };
+  const pickBranch = async (b: string) => {
+    setBranch(b); setSources([]); setSiteChosen(false);
+    if (!b || !owner || !repo) return;
+    const probe = await probeRepo(owner, repo, b, token);
+    setSources(probe.sources || []);
+    if (probe.branch && probe.branch !== b) setBranch(probe.branch);
+    setDemoPath(probe.siteRoot); setSiteRoot(probe.siteRoot); setSiteChosen(true);
+  };
+  const pickSource = (doc: string) => { setSiteRoot(doc); setDemoPath(doc); setSiteChosen(true); };
 
   const copyLink = async () => { await navigator.clipboard?.writeText(link); setCopied(true); setTimeout(() => setCopied(false), 1800); };
   const copyPin = async () => { await navigator.clipboard?.writeText(pin); setPinCopied(true); setTimeout(() => setPinCopied(false), 1800); };
@@ -192,7 +260,7 @@ function App() {
         <footer className="footer container"><span><a href="https://github.com/Spuds0588/EdgeQA" target="_blank" rel="noreferrer">Spuds0588/EdgeQA</a> · <a href="https://github.com/Spuds0588" target="_blank" rel="noreferrer">built by @Spuds0588</a></span><span>Frontend-only. Privacy-first.</span><span><a href="https://github.com/Spuds0588/EdgeQA/issues" target="_blank" rel="noreferrer">Found a bug? Report it <ArrowRight size={11} /></a></span></footer>
       </>}
 
-      {mode === "setup" && <Setup owner={owner} setOwner={setOwner} repo={repo} setRepo={setRepo} branch={branch} setBranch={setBranch} repoUrl={repoUrl} applyRepoUrl={applyRepoUrl} token={token} setToken={setToken} pin={pin} setPin={setPin} error={error} link={link} copied={copied} generate={generate} copyLink={copyLink} onBack={() => setMode("home")} onLaunch={() => setMode("viewer")} savePrompt={savePrompt} saveName={saveName} setSaveName={setSaveName} weakPin={weakPin} pinLen={pinLen} setPinLen={setPinLen} pinCopied={pinCopied} onGeneratePin={() => setPin(randomPin(pinLen))} onCopyPin={copyPin} onSaveLink={saveLink} onSkipSave={() => setSavePrompt(null)} savedLinks={savedLinks} savedFlash={savedFlash} onOpenSaved={openSaved} onCopySaved={copySaved} onRemoveSaved={removeSaved} onClearSaved={clearSaved} onExportBackup={exportBackup} onImportBackup={importBackup} />}
+      {mode === "setup" && <Setup owner={owner} setOwner={setOwner} repo={repo} setRepo={setRepo} branch={branch} setBranch={setBranch} repoUrl={repoUrl} siteRoot={siteRoot} repoWarn={repoWarn} applyRepoUrl={applyRepoUrl} token={token} setToken={setToken} account={account} repos={repos} branches={branches} sources={sources} connecting={connecting} connectError={connectError} onTokenChange={onTokenChange} onPickRepo={pickRepo} onPickBranch={pickBranch} onPickSource={pickSource} pin={pin} setPin={setPin} error={error} link={link} copied={copied} generate={generate} copyLink={copyLink} onBack={() => setMode("home")} onLaunch={() => setMode("viewer")} savePrompt={savePrompt} saveName={saveName} setSaveName={setSaveName} weakPin={weakPin} pinLen={pinLen} setPinLen={setPinLen} pinCopied={pinCopied} onGeneratePin={() => setPin(randomPin(pinLen))} onCopyPin={copyPin} onSaveLink={saveLink} onSkipSave={() => setSavePrompt(null)} savedLinks={savedLinks} savedFlash={savedFlash} onOpenSaved={openSaved} onCopySaved={copySaved} onRemoveSaved={removeSaved} onClearSaved={clearSaved} onExportBackup={exportBackup} onImportBackup={importBackup} />}
       {mode === "unlock" && <main className="unlock container"><div className="unlock-card"><div className="empty-icon"><LockKeyhole size={25} /></div><div className="eyebrow"><span className="pulse" /> PRIVATE QA SESSION</div><h1>Enter the <em>session PIN.</em></h1><p>Unlock the browser-only preview for <b>{repoLabel}</b>. The repository token will never be saved.</p><input autoFocus type="password" value={unlockPin} onChange={(e) => setUnlockPin(e.target.value)} onKeyDown={(e) => e.key === "Enter" && unlock()} placeholder="Session PIN" />{error && <div className="error">{error}</div>}<button className="primary full" onClick={unlock}>Unlock preview <ArrowRight size={17} /></button><button className="back" onClick={() => { window.location.hash = ""; setMode("home"); }}>← Create your own session</button></div></main>}
     </div>
   );
@@ -201,9 +269,10 @@ function App() {
 function Setup(props: any) {
   const [patOpen, setPatOpen] = useState(false);
   const target = props.owner && props.repo ? `${props.owner}/${props.repo}#${props.branch}` : "owner/repo#main";
+  const linkNote = props.repoWarn || (props.siteRoot ? `Auto-detected site folder: \`${props.siteRoot}/\` — previewing from there.` : "");
   const appUrl = window.location.href.split("#")[0];
   const bookmarklet = "javascript:(()=>{const m=location.pathname.match(/^\\/([^/]+)\\/([^/]+)/);if(!m)return alert('Open a GitHub repo page first');const b=(location.pathname.match(/\\/(?:tree|blob)\\/([^/]+)/)||[])[1]||'main';location.href='" + appUrl + "#repo='+m[1]+'/'+m[2]+'&branch='+b})()";
-  return <><main className="setup container"><button className="back" onClick={props.onBack}>← Back to home</button><div className="setup-grid"><div className="setup-intro"><div className="eyebrow"><span className="pulse" /> NEW QA SESSION</div><h1>Bring your repo.<br /><em>Leave the deploy.</em></h1><p>Paste a GitHub repository URL, pick your branch, and mint a PIN-protected QA link — all in your browser.</p><div className="setup-note"><ShieldCheck size={18} /><span><b>Your token is ephemeral</b><small>Held in browser memory (per-tab) and not sent to any server.</small></span></div><div className="setup-note"><Link2 size={18} /><span><b>Your app runs on the EdgeQA origin</b><small>Preview requests come from this site's domain — if your app calls third-party APIs, allowlist <code>{window.location.origin}</code> for CORS / OAuth redirects. GitHub's own API needs no allowlist.</small></span></div><div className="bookmark-box"><Zap size={15} /><div><b>Open any repo in one click</b><small>Drag this into your bookmarks bar, then press it while viewing a GitHub repo to pre-fill this form.</small></div><a className="bookmarklet" href={bookmarklet}>⚡ Install bookmarklet</a></div></div><div className="form-card"><div className="form-title"><span className="step-badge">01</span><span><b>Connect repository</b><small>Fine-grained token required</small></span></div><label>Repository URL<div className="input-icon"><Link2 size={15} /><input value={props.repoUrl} onChange={(e: any) => props.applyRepoUrl(e.target.value)} placeholder="https://github.com/acme/site or acme/site" /></div><small className="hint">Paste a full GitHub URL (owner &amp; repo are pulled out). Supports <code>/tree/BRANCH</code>.</small></label><label>Branch<input value={props.branch} onChange={(e: any) => props.setBranch(e.target.value)} /></label><div className="target-chip"><Link2 size={13} /> <span>{target}</span></div><div className="pat-box"><div className="pat-head" onClick={() => setPatOpen(!patOpen)}><KeyRound size={15} /><span><b>Need a fine-grained token?</b><small>Steps to create one</small></span><ChevronDown size={15} className={patOpen ? "spin" : ""} /></div>{patOpen && <div className="pat-open"><div className="pat-actions"><a className="pat-btn primary" href="https://github.com/settings/personal-access-tokens/new?scopes=contents:read,issues:write&description=EdgeQA" target="_blank" rel="noreferrer"><KeyRound size={13} /> Create a token</a><a className="pat-btn ghost" href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noreferrer">Have one? Manage tokens</a></div><ol className="pat-steps"><li>Click <b>Create a token</b> above — it opens in a new window, already pre-scoped with <b>Contents: Read</b> and <b>Issues: Read &amp; write</b>.</li><li>Choose <b>Fine-grained tokens</b>, then give it a name (e.g. <code>edgeqa</code>) and an expiry.</li><li>Under <b>Repository access</b>, choose <b>Only select repositories</b> and pick the repo(s) you want to preview.</li><li>Confirm the <b>Permissions</b> are set: <b>Contents → Read-only</b> and <b>Issues → Read and write</b>.</li><li>Generate, then paste the <code>github_pat_…</code> token into the field below.</li><li>Reuse it across sessions in this tab, or remove it after the link is minted — it only ever lives in your browser.</li></ol></div>}</div><label>GitHub fine-grained token<div className="input-icon"><KeyRound size={15} /><input type="password" value={props.token} onChange={(e: any) => props.setToken(e.target.value)} placeholder="github_pat_••••••••••" /></div><small className="hint">Needs <b>Contents: Read</b> to serve files and <b>Issues: Write</b> to accept bug reports.</small></label><div className="form-title second"><span className="step-badge">02</span><span><b>Protect your link</b><small>Share the PIN separately</small></span></div><label>Session PIN<div className="pin-row"><div className="input-icon"><LockKeyhole size={15} /><input type="password" value={props.pin} onChange={(e: any) => props.setPin(e.target.value)} placeholder="Auto-generated PIN" /></div><select className="pin-len" value={props.pinLen} onChange={(e: any) => props.setPinLen(Number(e.target.value))} title="PIN length"><option value={8}>8</option><option value={12}>12</option><option value={16}>16</option></select><button className="pin-btn" onClick={props.onGeneratePin} title="Generate a new PIN"><RefreshCw size={14} /></button><button className="pin-btn" onClick={props.onCopyPin} title="Copy PIN to clipboard">{props.pinCopied ? <Check size={14} /> : <Clipboard size={14} />}</button></div><small className="hint">A secure PIN is auto-generated — press ↻ to make a new one, pick a length, and <b>copy it to share with your tester</b>. It's the only key to the token.</small></label>{props.error && <div className="error">{props.error}</div>}<button className="primary full" onClick={props.generate}>Generate magic link <ArrowRight size={17} /></button>{props.link && <div className="link-result"><small>YOUR SECURE QA LINK</small><div><span>{props.link.slice(0, 42)}…</span><button onClick={props.copyLink}>{props.copied ? <Check size={16} /> : <Clipboard size={16} />}</button></div><button className="launch" onClick={props.onLaunch}>Open preview <ArrowRight size={14} /></button>{props.savePrompt && <div className="save-prompt"><div className="save-prompt-text"><b>Save this QA link?</b><small>Stored PIN-encrypted in this browser only — the PIN itself is never saved.{props.weakPin ? <em> Heads up: this PIN is short or numeric, and saved links can be brute-forced offline. Prefer 8+ characters with letters.</em> : null}</small></div><input value={props.saveName} onChange={(e: any) => props.setSaveName(e.target.value)} placeholder="Name this link" /><div className="save-prompt-actions"><button className="primary small" onClick={props.onSaveLink}>Save link</button><button className="ghost small" onClick={props.onSkipSave}>Not now</button></div></div>}</div>}</div></div></main><section className="saved-section container"><div className="saved-head"><div><div className="eyebrow"><span className="pulse" /> YOUR QA LINKS</div><h2>Saved in this browser</h2></div><div className="saved-tools">{props.savedFlash && <span className="saved-flash">{props.savedFlash}</span>}<button className="ghost small" onClick={props.onExportBackup} title="Download a JSON backup">Export backup</button><label className="ghost small file">Import backup<input type="file" accept=".json,application/json" onChange={(e) => { const f = e.target.files?.[0]; if (f) props.onImportBackup(f); e.target.value = ""; }} /></label></div></div>{props.savedLinks.length === 0 ? <p className="saved-empty">Nothing saved yet. Generate a link and choose <b>Save</b> — it's stored PIN-encrypted in this browser only. Export a backup to move links between browsers.</p> : <><div className="saved-list">{props.savedLinks.map((l: any) => <div className="saved-item" key={l.id}><div className="saved-ico"><Link2 size={14} /></div><div className="saved-meta"><b>{l.name}</b><small>{l.owner}/{l.repo} · {l.branch} · saved {new Date(l.createdAt).toLocaleDateString()}</small></div><div className="saved-actions"><button title="Copy link" onClick={() => props.onCopySaved(l)}><Clipboard size={13} /></button><button title="Open (enter PIN)" onClick={() => props.onOpenSaved(l)}><Play size={13} /></button><button title="Delete" onClick={() => props.onRemoveSaved(l.id)}><X size={13} /></button></div></div>)}</div><button className="clear-all" onClick={props.onClearSaved}>Clear all saved links</button></>}</section></>;
+  return <><main className="setup container"><button className="back" onClick={props.onBack}>← Back to home</button><div className="setup-grid"><div className="setup-intro"><div className="eyebrow"><span className="pulse" /> NEW QA SESSION</div><h1>Bring your repo.<br /><em>Leave the deploy.</em></h1><p>Paste a GitHub repository URL, pick your branch, and mint a PIN-protected QA link — all in your browser.</p><div className="setup-note"><ShieldCheck size={18} /><span><b>Your token is ephemeral</b><small>Held in browser memory (per-tab) and not sent to any server.</small></span></div><div className="setup-note"><Link2 size={18} /><span><b>Your app runs on the EdgeQA origin</b><small>Preview requests come from this site's domain — if your app calls third-party APIs, allowlist <code>{window.location.origin}</code> for CORS / OAuth redirects. GitHub's own API needs no allowlist.</small></span></div><div className="bookmark-box"><Zap size={15} /><div><b>Open any repo in one click</b><small>Drag this into your bookmarks bar, then press it while viewing a GitHub repo to pre-fill this form.</small></div><a className="bookmarklet" href={bookmarklet}>⚡ Install bookmarklet</a></div></div><div className="form-card"><div className="form-title"><span className="step-badge">01</span><span><b>Connect repository</b><small>Fine-grained token required</small></span></div><label>Repository URL<div className="input-icon"><Link2 size={15} /><input value={props.repoUrl} onChange={(e: any) => props.applyRepoUrl(e.target.value)} placeholder="https://github.com/acme/site or acme/site" /></div><small className="hint">Paste a full GitHub URL (owner &amp; repo are pulled out). Supports <code>/tree/BRANCH</code>.</small></label>{!props.account && <label>Branch<input value={props.branch} onChange={(e: any) => props.setBranch(e.target.value)} /></label>}<div className="target-chip"><Link2 size={13} /> <span>{target}</span></div><div className="pat-box"><div className="pat-head" onClick={() => setPatOpen(!patOpen)}><KeyRound size={15} /><span><b>Need a fine-grained token?</b><small>Steps to create one</small></span><ChevronDown size={15} className={patOpen ? "spin" : ""} /></div>{patOpen && <div className="pat-open"><div className="pat-actions"><a className="pat-btn primary" href="https://github.com/settings/personal-access-tokens/new?scopes=contents:read,issues:write&description=EdgeQA" target="_blank" rel="noreferrer"><KeyRound size={13} /> Create a token</a><a className="pat-btn ghost" href="https://github.com/settings/personal-access-tokens" target="_blank" rel="noreferrer">Have one? Manage tokens</a></div><ol className="pat-steps"><li>Click <b>Create a token</b> above — it opens in a new window, already pre-scoped with <b>Contents: Read</b> and <b>Issues: Read &amp; write</b>.</li><li>Choose <b>Fine-grained tokens</b>, then give it a name (e.g. <code>edgeqa</code>) and an expiry.</li><li>Under <b>Repository access</b>, choose <b>Only select repositories</b> and pick the repo(s) you want to preview.</li><li>Confirm the <b>Permissions</b> are set: <b>Contents → Read-only</b> and <b>Issues → Read and write</b>.</li><li>Generate, then paste the <code>github_pat_…</code> token into the field below.</li><li>Reuse it across sessions in this tab, or remove it after the link is minted — it only ever lives in your browser.</li></ol></div>}</div><label>GitHub fine-grained token<div className="input-icon"><KeyRound size={15} /><input type="password" value={props.token} onChange={(e: any) => props.onTokenChange(e.target.value)} placeholder="github_pat_••••••••••" /></div><small className="hint">Needs <b>Contents: Read</b> to serve files and <b>Issues: Write</b> to accept bug reports. Public repos can preview with no token at all.</small></label>{(props.connecting || props.connectError || props.account) && <div className="discovery">{(props.repos.length || props.connectError || props.connecting) && <div className="connect-bar">{props.connecting ? "Connecting to GitHub…" : <>✓ Connected as <b>{props.account}</b> · {props.repos.length} repo{props.repos.length === 1 ? "" : "s"}</>}</div>}{props.connectError && <div className="error">{props.connectError}</div>}<label>Repository<div className="input-icon"><GitBranch size={15} /><select value={props.owner && props.repo ? `${props.owner}/${props.repo}` : ""} onChange={(e: any) => props.onPickRepo(e.target.value)}><option value="">Select a repository…</option>{props.repos.map((r: any) => <option key={r.full_name} value={r.full_name}>{r.full_name}{r.private ? " 🔒" : ""}</option>)}</select></div></label><label>Branch<div className="input-icon"><GitBranch size={15} /><select value={props.branch} onChange={(e: any) => props.onPickBranch(e.target.value)} disabled={!props.branches.length}><option value="">{props.branches.length ? "Select a branch…" : "Loading branches…"}</option>{props.branches.map((b: string) => <option key={b} value={b}>{b}</option>)}</select></div></label><label>Site source (root HTML)<div className="site-source">{props.sources.length ? <div className="src-chips" data-testid="src-chips">{props.sources.map((s: any) => <button key={s.doc} type="button" className={props.siteRoot === s.doc ? "chip on" : "chip"} onClick={() => props.onPickSource(s.doc)}>{s.label}</button>)}</div> : <small className="hint">We auto-detect the web root from the repo tree — type a path below if it isn't found.</small>}<input value={props.siteRoot} onChange={(e: any) => props.onPickSource(e.target.value)} placeholder="Folder or root.html path (e.g. docs/index.html)" /></div><small className="hint">Point at the page that loads first (repo root by default). Assets stay relative, so any root HTML works.</small></label></div>}<div className="form-title second"><span className="step-badge">02</span><span><b>Protect your link</b><small>Share the PIN separately</small></span></div><label>Session PIN<div className="pin-row"><div className="input-icon"><LockKeyhole size={15} /><input type="password" value={props.pin} onChange={(e: any) => props.setPin(e.target.value)} placeholder="Auto-generated PIN" /></div><select className="pin-len" value={props.pinLen} onChange={(e: any) => props.setPinLen(Number(e.target.value))} title="PIN length"><option value={8}>8</option><option value={12}>12</option><option value={16}>16</option></select><button className="pin-btn" onClick={props.onGeneratePin} title="Generate a new PIN"><RefreshCw size={14} /></button><button className="pin-btn" onClick={props.onCopyPin} title="Copy PIN to clipboard">{props.pinCopied ? <Check size={14} /> : <Clipboard size={14} />}</button></div><small className="hint">A secure PIN is auto-generated — press ↻ to make a new one, pick a length, and <b>copy it to share with your tester</b>. It's the only key to the token.</small></label>{props.error && <div className="error">{props.error}</div>}<button className="primary full" onClick={props.generate}>Generate magic link <ArrowRight size={17} /></button>{props.link && <div className="link-result"><small>YOUR SECURE QA LINK</small><div><span>{props.link.slice(0, 42)}…</span><button onClick={props.copyLink}>{props.copied ? <Check size={16} /> : <Clipboard size={16} />}</button></div>{linkNote && <div className="link-note">{linkNote}</div>}<button className="launch" onClick={props.onLaunch}>Open preview <ArrowRight size={14} /></button>{props.savePrompt && <div className="save-prompt"><div className="save-prompt-text"><b>Save this QA link?</b><small>Stored PIN-encrypted in this browser only — the PIN itself is never saved.{props.weakPin ? <em> Heads up: this PIN is short or numeric, and saved links can be brute-forced offline. Prefer 8+ characters with letters.</em> : null}</small></div><input value={props.saveName} onChange={(e: any) => props.setSaveName(e.target.value)} placeholder="Name this link" /><div className="save-prompt-actions"><button className="primary small" onClick={props.onSaveLink}>Save link</button><button className="ghost small" onClick={props.onSkipSave}>Not now</button></div></div>}</div>}</div></div></main><section className="saved-section container"><div className="saved-head"><div><div className="eyebrow"><span className="pulse" /> YOUR QA LINKS</div><h2>Saved in this browser</h2></div><div className="saved-tools">{props.savedFlash && <span className="saved-flash">{props.savedFlash}</span>}<button className="ghost small" onClick={props.onExportBackup} title="Download a JSON backup">Export backup</button><label className="ghost small file">Import backup<input type="file" accept=".json,application/json" onChange={(e) => { const f = e.target.files?.[0]; if (f) props.onImportBackup(f); e.target.value = ""; }} /></label></div></div>{props.savedLinks.length === 0 ? <p className="saved-empty">Nothing saved yet. Generate a link and choose <b>Save</b> — it's stored PIN-encrypted in this browser only. Export a backup to move links between browsers.</p> : <><div className="saved-list">{props.savedLinks.map((l: any) => <div className="saved-item" key={l.id}><div className="saved-ico"><Link2 size={14} /></div><div className="saved-meta"><b>{l.name}</b><small>{l.owner}/{l.repo} · {l.branch} · saved {new Date(l.createdAt).toLocaleDateString()}</small></div><div className="saved-actions"><button title="Copy link" onClick={() => props.onCopySaved(l)}><Clipboard size={13} /></button><button title="Open (enter PIN)" onClick={() => props.onOpenSaved(l)}><Play size={13} /></button><button title="Delete" onClick={() => props.onRemoveSaved(l.id)}><X size={13} /></button></div></div>)}</div><button className="clear-all" onClick={props.onClearSaved}>Clear all saved links</button></>}</section></>;
 }
 
 function Viewer({ repo, branch, path, token, readonly, onExit }: { repo: string; branch: string; path: string; token: string; readonly: boolean; onExit: () => void }) {
@@ -224,8 +293,9 @@ function Viewer({ repo, branch, path, token, readonly, onExit }: { repo: string;
   const openReport = () => { setReportOpen(true); setIssueUrl(""); setDemoFiled(false); setReportError(""); };
   const base = import.meta.env.BASE_URL || "/";
   const baseRoot = base.endsWith("/") ? base : base + "/";
-  const dir = path ? path.replace(/^\/+|\/+$/g, "") + "/" : "";
-  const sandboxUrl = `${baseRoot}sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/${dir}index.html`;
+  const doc = (path || "").replace(/^\/+|\/+$/g, "");
+  const urlPath = /\.html?$/i.test(doc) ? doc : (doc ? `${doc}/index.html` : "index.html");
+  const sandboxUrl = `${baseRoot}sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/${urlPath}`;
   // capture the session's console lines (a ring buffer) so the tester can opt to attach them to a report
   const consoleBuf = useRef<{ level: string; line: string }[]>([]);
   useEffect(() => {

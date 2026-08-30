@@ -1,3 +1,9 @@
+// Shown in place of a bare 404 when a repo has no index.html to preview.
+const WEB_ROOTS_MISSING_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>No web page to preview</title></head><body style="margin:0;background:#f3f2ea;color:#18242a;font:600 15px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"><div style="max-width:560px;margin:10vh auto;padding:0 22px"><div style="font-size:28px;margin-bottom:14px">🕸</div><h1 style="font-size:20px;margin:0 0 10px">Nothing to preview here</h1><p style="margin:0 0 8px;color:#44565c">EdgeQA previews web applications, and we couldn't find an <code style="background:#e4e4da;border-radius:4px;padding:1px 6px;font:600 12px ui-monospace,monospace">index.html</code> on this branch.</p><p style="margin:0 0 8px;color:#44565c">The page may live in a subfolder, or a different branch (check the <b>branch</b> and <b>site folder</b> on your QA link).</p></div></body></html>`;
+// Shown when a tokenless preview can't fetch anything (the repo is private, or it
+// has no public web content at this entry). Keeps the session locked rather than
+// pretending a private repo is a misconfigured public one.
+const LOCKED_PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Preview locked</title></head><body style="margin:0;background:#f3f2ea;color:#18242a;font:600 15px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"><div style="max-width:560px;margin:10vh auto;padding:0 22px"><div style="font-size:28px;margin-bottom:14px">🔒</div><h1 style="font-size:20px;margin:0 0 10px">This preview needs the session PIN</h1><p style="margin:0;color:#44565c">This is a private repository (or has no public web page at this path), so it can only be unlocked with the token held behind the session PIN.</p></div></body></html>`;
 const CACHE_NAME = "edgeqa-vfs-v2"; // bump to invalidate cached content (e.g. when the demo example changes)
 const CACHE_TTL_MS = 5 * 60 * 1000; // serve cached files for up to 5 minutes, then refetch from GitHub
 const tokenByScope = new Map();
@@ -82,13 +88,16 @@ self.addEventListener("fetch", (event) => {
     if (cached && !isHtml && Date.now() - Number(cached.headers.get("x-edgeqa-cached-at") || 0) < CACHE_TTL_MS) { log("cache hit", info.path); return cached; }
     if (cached) log(isHtml ? "html — refetching" : "cache stale — refetching", info.path);
     const token = tokenByScope.get(scopeOf(info));
-    if (!token && scopeOf(info) !== DEMO_SCOPE) { log("locked, no token for", scopeOf(info)); return new Response("EdgeQA session is locked", { status: 401 }); }
     let response = await githubFileSafe(info, token);
     if (!response && info.path !== "index.html") { log("spa fallback", info.path); response = await githubFileSafe({ ...info, path: "index.html" }, token); }
     if (!response) {
       // Refetch failed (rate limit, transient error): serve any cached copy rather than break the preview.
       if (cached) { log("refetch failed — serving cached copy", info.path); return cached; }
-      log("404", info.path); return new Response("File not found", { status: 404 });
+      if (token) { log("no web app", info.path); return new Response(WEB_ROOTS_MISSING_HTML, { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } }); }
+      // Tokenless and GitHub anonymous fetch came up empty: this is a private repo (or
+      // has no public web content at this entry). Keep the preview locked rather than proxy
+      // material we couldn't fetch — the token behind the session PIN unlocks it.
+      log("locked, anonymous fetch failed for", scopeOf(info)); return new Response(LOCKED_PAGE_HTML, { status: 401, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
     if (response.status === 200) {
       const headers = new Headers(response.headers);

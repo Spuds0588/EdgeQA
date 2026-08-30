@@ -118,18 +118,29 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(await res.text()).toContain("CACHED");
   });
 
-  it("returns 404 (not a crash) when a refetch fails and nothing is cached", async () => {
+  it("returns 404 (no web app) when a token-backed refetch fails and nothing is cached", async () => {
     const sw = makeSW(async () => {
       throw new TypeError("Failed to fetch");
     });
+    await sw.message({ type: "SET_TOKEN", scope: "Spuds0588/EdgeQA/main", token: "t" });
     const res = await sw.fetchEvent(DEMO_HTML_URL);
     expect(res.status).toBe(404);
   });
 
-  it("locks non-demo scopes without a token (401)", async () => {
-    const sw = makeSW(async () => ok(JSON.stringify(contentsJson("<html>nope</html>"))));
-    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/index.html");
+  it("serves any public scope without a token (anonymous GitHub fetch)", async () => {
+    const sw = makeSW(htmlFetch("<html><body>PUBLIC</body></html>"));
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/public-site/main/index.html");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("PUBLIC");
+  });
+
+  it("locks a tokenless scope when the anonymous fetch fails (401, private repo)", async () => {
+    const sw = makeSW(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/private-repo/main/index.html");
     expect(res.status).toBe(401);
+    expect(await res.text()).toContain("needs the session PIN");
   });
 
   it("serves the demo scope without a token", async () => {
