@@ -2,7 +2,7 @@
 
 **🔗 Live site:** [https://spuds0588.github.io/EdgeQA/](https://spuds0588.github.io/EdgeQA/)
 
-**▶ Try the live demo** (no repo or token needed): [open a QA session for the example project](https://spuds0588.github.io/EdgeQA/#demo) — it previews the public [`examples/northstar/`](examples/northstar/) site straight from this repo's files via the VFS.
+**▶ Try the live demo** (no repo or token needed): [open a QA session for the example project](https://spuds0588.github.io/EdgeQA/#demo) — it previews the public [`examples/northstar/`](examples/northstar/) site straight from this repo's files via the VFS, and you can walk the whole flow including a **simulated issue filing** (nothing is actually created on GitHub). Share it read-only with [`#demo&readonly=1`](https://spuds0588.github.io/EdgeQA/#demo&readonly=1) to hide the EdgeQA chrome.
 
 [![Deploy to GitHub Pages](https://github.com/Spuds0588/EdgeQA/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/Spuds0588/EdgeQA/actions/workflows/deploy-pages.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -30,7 +30,9 @@ Staging environments are a pain. Deploying every branch to a preview host is slo
 | **Read-through cache** | Repo files are cached so reloads are instant and API rate limits are spared. |
 | **Large-asset fallback** | Handles GitHub's 1MB contents-API limit via the Git Database API (up to 100MB), and synthesizes safe placeholders for anything larger. |
 | **SPA fallback** | Virtual 404s fall back to `index.html`, so client-side routers work. |
-| **In-context bug reporting** | A report drawer (side panel on desktop, bottom sheet on mobile) collects title + description with path, viewport, and UA attached. |
+| **In-context bug reporting** | A report drawer (side panel on desktop, bottom sheet on mobile) collects title + description with path, viewport, and UA attached, then opens a real GitHub issue via the session token. |
+| **Tryable demo** | The tokenless live demo ([`/#demo`](https://spuds0588.github.io/EdgeQA/#demo)) previews a public example repo and simulates the whole QA loop, including a fake issue submission, so visitors can experience the product before bringing their own repo. |
+| **Read-only share links** | Append `&readonly=1` to any session URL to hide the EdgeQA header and bug-reporting UI — a pure preview for sharing with stakeholders. |
 | **Paste-a-repo URL** | Drop in `https://github.com/acme/site` (or `acme/site`, or a `/tree/` branch URL) and the form fills itself. |
 | **Bookmarklet** | One-click pre-fill from any GitHub repo page. |
 | **Mobile QA** | The full preview + report flow works on phones. |
@@ -107,6 +109,8 @@ The project deploys to GitHub Pages automatically on every push to `main` via `.
 3. Found something off? Hit **Report a bug** (side tab on desktop, tab on mobile) and file it — the session context is attached automatically.
 
 **Bookmarklet:** on the setup screen, drag **⚡ Install bookmarklet** to your bookmarks bar. While viewing any GitHub repo, click it and EdgeQA opens with that repo pre-filled.
+
+**Share a read-only preview:** append `&readonly=1` to a session link (e.g. `…#demo&readonly=1` or a PIN-protected link plus `&readonly=1`) and the recipient gets a pure preview with no EdgeQA header and no way to file bugs — handy for walkthroughs and stakeholder review.
 
 ## Project structure
 

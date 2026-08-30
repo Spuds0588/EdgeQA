@@ -96,6 +96,8 @@ const CSS = `
 .send.pop { transform:scale(1.12); }
 /* scene 2: desktop QA overlays */
 .pill { position:absolute; right:16px; bottom:16px; display:flex; align-items:center; gap:8px; background:#132a2e; color:var(--qa-acid); font-size:10px; font-weight:600; padding:10px 14px; border-radius:5px; box-shadow:0 6px 20px rgba(0,0,0,.35); transition:transform .2s, box-shadow .2s; }
+.bug { width:12px; height:12px; flex:none; }
+.ppill .bug { width:9px; height:9px; }
 .pill.hot { transform:translateY(-2px); box-shadow:0 10px 26px rgba(201,243,107,.25); }
 .pill.pop { transform:scale(1.12); }
 .drawer { position:absolute; top:10px; right:10px; bottom:10px; width:300px; background:#0f181e; border:1px solid #2a3941; border-radius:8px; padding:16px 16px 14px; display:flex; flex-direction:column; transform:translateX(calc(100% + 24px)); transition:transform .32s ease; box-shadow:-14px 0 40px rgba(0,0,0,.35); }
@@ -173,7 +175,7 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
   </div>
 
   <div class="desk" id="desk">
-    <div class="pill" id="pill">🐞 <span>Report a bug</span></div>
+    <div class="pill" id="pill"><svg class="bug" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg><span>Report a bug</span></div>
     <aside class="drawer" id="drawer">
       <div class="drawer-head"><div><b>Report a bug</b><small id="dRepo">acme/marketing-site · main</small></div><span>×</span></div>
       <label>Short title<input id="dTitle" placeholder="e.g. Broken nav on mobile" autocomplete="off"></label>
@@ -201,7 +203,7 @@ template.innerHTML = `<style>${CSS}</style><div class="stage">
       <div class="psite">
         <div class="pnav"><b>Northstar</b><span class="plive"><i></i>LIVE</span></div>
         <div class="pher"><span class="kicker">THE OPERATING SYSTEM FOR MODERN TEAMS</span><h2>Make work <strong>flow.</strong></h2><p>One calm space for your team's best thinking, building, and shipping.</p><button>Explore →</button></div>
-        <div class="ppill" id="p3Pill">🐞 Report</div>
+        <div class="ppill" id="p3Pill"><svg class="bug" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88"/><path d="M14.12 3.88 16 2"/><path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/><path d="M12 20v-9"/><path d="M6.53 9C4.6 8.8 3 7.1 3 5"/><path d="M6 13H2"/><path d="M3 21c0-2.1 1.7-3.9 3.8-4"/><path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/><path d="M22 13h-4"/><path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg> Report</div>
         <aside class="psheet" id="p3Sheet">
           <div class="psheet-head"><b>Report a bug</b><span>×</span></div>
           <label>Short title<input id="p3Title" placeholder="e.g. Checkout broken" autocomplete="off"></label>
