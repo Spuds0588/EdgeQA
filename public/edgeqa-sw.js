@@ -1,5 +1,9 @@
 const CACHE_NAME = "edgeqa-vfs-v1";
 const tokenByScope = new Map();
+// The public example repo the "Try the live demo" flow points at. It is served
+// without a token so visitors can preview the platform before bringing their own
+// repo. Update this if the example project moves to another repo/path.
+const DEMO_SCOPE = "Spuds0588/EdgeQA/main";
 const VFS_TAG = "[edgeqa-sw]";
 const log = (...args) => console.log(VFS_TAG, ...args);
 const scopePath = (self.registration && self.registration.scope ? new URL(self.registration.scope).pathname : "/").replace(/\/$/, "") || "/";
@@ -28,7 +32,7 @@ function contentType(path) { return mime[path.split(".").pop()?.toLowerCase()] |
 function decodeBase64(value) { const binary = atob(value.replace(/\n/g, "")); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i); return bytes; }
 function scopeOf(info) { return `${info.owner}/${info.repo}/${info.branch}`; }
 async function githubFile(info, token) {
-  const headers = { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` };
+  const headers = token ? { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` } : { Accept: "application/vnd.github+json" };
   const endpoint = `https://api.github.com/repos/${encodeURIComponent(info.owner)}/${encodeURIComponent(info.repo)}/contents/${info.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(info.branch)}`;
   log("fetch contents", info.path, ">", endpoint);
   const response = await fetch(endpoint, { headers });
@@ -56,7 +60,8 @@ self.addEventListener("fetch", (event) => {
   log("intercept", info.owner + "/" + info.repo + "/" + info.branch + "/" + info.path);
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME); const cached = await cache.match(event.request); if (cached) { log("cache hit", info.path); return cached; }
-    const token = tokenByScope.get(scopeOf(info)); if (!token) { log("locked, no token for", scopeOf(info)); return new Response("EdgeQA session is locked", { status: 401 }); }
+    const token = tokenByScope.get(scopeOf(info));
+    if (!token && scopeOf(info) !== DEMO_SCOPE) { log("locked, no token for", scopeOf(info)); return new Response("EdgeQA session is locked", { status: 401 }); }
     let response = await githubFile(info, token);
     if (!response && info.path !== "index.html") { log("spa fallback", info.path); response = await githubFile({ ...info, path: "index.html" }, token); }
     if (!response) { log("404", info.path); return new Response("File not found", { status: 404 }); }

@@ -1,11 +1,15 @@
 import { createElement, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowRight, Check, ChevronDown, Clipboard, GitBranch, KeyRound, Link2, LockKeyhole, Menu, ShieldCheck, X, Zap } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, Clipboard, GitBranch, KeyRound, Link2, LockKeyhole, Menu, Play, ShieldCheck, X, Zap } from "lucide-react";
 import "./index.css";
 import "./demo-element";
 import { parseRepoInput } from "./lib/repo";
 
 type Mode = "home" | "setup" | "unlock" | "viewer";
+
+// The public example project behind the "Try the live demo" flow. Lives in this
+// repo (examples/northstar/) so the VFS serves it with no token at all.
+const DEMO = { owner: "Spuds0588", repo: "EdgeQA", branch: "main", path: "examples/northstar" };
 
 const features = [
   { icon: ShieldCheck, title: "Private by design", text: "Your token stays in browser memory. Nothing is uploaded, proxied, or persisted." },
@@ -50,17 +54,21 @@ function App() {
   const [token, setToken] = useState(""); // held in memory only, per the PRD's "not localStorage" rule
   const [pin, setPin] = useState("");
   const [link, setLink] = useState("");
+  const [demoPath, setDemoPath] = useState("");
   const [copied, setCopied] = useState(false);
   const [unlockPin, setUnlockPin] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-    if (!hash.get("repo")) return;
-    const [parsedOwner, parsedRepo] = decodeURIComponent(hash.get("repo")!).split("/");
-    setOwner(parsedOwner || ""); setRepo(parsedRepo || ""); setBranch(hash.get("branch") || "main");
-    setMode(hash.get("payload") ? "unlock" : "setup");
+    const hasDemo = hash.has("demo");
+    if (!hash.get("repo") && !hasDemo) return;
+    const [parsedOwner, parsedRepo] = decodeURIComponent(hash.get("repo") || `${DEMO.owner}/${DEMO.repo}`).split("/");
+    setOwner(parsedOwner || DEMO.owner); setRepo(parsedRepo || DEMO.repo); setBranch(hash.get("branch") || DEMO.branch); setDemoPath(hash.get("path") || (hasDemo ? DEMO.path : ""));
+    setMode(hash.get("payload") ? "unlock" : hasDemo ? "viewer" : "setup");
   }, []);
+
+  const openDemo = () => { setOwner(DEMO.owner); setRepo(DEMO.repo); setBranch(DEMO.branch); setDemoPath(DEMO.path); setMode("viewer"); };
 
   const repoLabel = useMemo(() => owner && repo ? `${owner}/${repo}` : "your private repository", [owner, repo]);
 
@@ -93,7 +101,7 @@ function App() {
     } catch { setError("That PIN did not unlock this QA session."); }
   };
 
-  if (mode === "viewer") return <Viewer repo={repoLabel} branch={branch} token={token} onExit={() => setMode("home")} />;
+  if (mode === "viewer") return <Viewer repo={repoLabel} branch={branch} path={demoPath} token={token} onExit={() => setMode("home")} />;
 
   return (
     <div className="app-shell">
@@ -109,7 +117,7 @@ function App() {
             <div className="eyebrow"><span className="pulse" /> BROWSER-NATIVE QA FOR GITHUB</div>
             <h1>Ship confidence.<br /><em>Not your source code.</em></h1>
             <p className="hero-copy">Turn any private GitHub repository into a secure, shareable QA environment. No deploys. No servers. No code leaving your browser.</p>
-            <div className="hero-actions"><button className="primary" onClick={() => setMode("setup")}>Create a QA link <ArrowRight size={17} /></button><button className="ghost" onClick={() => document.getElementById("how")?.scrollIntoView({ behavior: "smooth" })}><ArrowRight size={15} /> See how it works</button></div>
+            <div className="hero-actions"><button className="primary" onClick={() => setMode("setup")}>Create a QA link <ArrowRight size={17} /></button><button className="demo-cta" onClick={openDemo}><Play size={15} /> Try the live demo</button><button className="ghost" onClick={() => document.getElementById("how")?.scrollIntoView({ behavior: "smooth" })}><ArrowRight size={15} /> See how it works</button></div>
             <div className="trust-row"><span>Built for teams who care about</span><b><LockKeyhole size={13} /> privacy</b><b><Zap size={13} /> velocity</b><b><GitBranch size={13} /> GitHub</b></div>
           </section>
           <section className="preview-wrap container"><div className="preview-glow" />{createElement("edgeqa-demo", { auto: "auto", owner: owner || "acme", repo: repo || "marketing-site", branch: branch || "main" })}</section>
@@ -134,7 +142,7 @@ function Setup(props: any) {
   return <main className="setup container"><button className="back" onClick={props.onBack}>← Back to home</button><div className="setup-grid"><div className="setup-intro"><div className="eyebrow"><span className="pulse" /> NEW QA SESSION</div><h1>Bring your repo.<br /><em>Leave the deploy.</em></h1><p>Paste a GitHub repository URL, pick your branch, and mint a PIN-protected QA link — all in your browser.</p><div className="setup-note"><ShieldCheck size={18} /><span><b>Your token is ephemeral</b><small>Held in browser memory (per-tab) and not sent to any server.</small></span></div><div className="bookmark-box"><Zap size={15} /><div><b>Open any repo in one click</b><small>Drag this into your bookmarks bar, then press it while viewing a GitHub repo to pre-fill this form.</small></div><a className="bookmarklet" href={bookmarklet}>⚡ Install bookmarklet</a></div></div><div className="form-card"><div className="form-title"><span className="step-badge">01</span><span><b>Connect repository</b><small>Fine-grained token required</small></span></div><label>Repository URL<div className="input-icon"><Link2 size={15} /><input value={props.repoUrl} onChange={(e: any) => props.applyRepoUrl(e.target.value)} placeholder="https://github.com/acme/site or acme/site" /></div><small className="hint">Paste a full GitHub URL (owner & repo are pulled out), or fill the fields below. Supports <code>/tree/BRANCH</code>.</small></label><div className="two-col"><label>Repository owner<input value={props.owner} onChange={(e: any) => props.setOwner(e.target.value)} placeholder="e.g. acme-studio" /></label><label>Repository name<input value={props.repo} onChange={(e: any) => props.setRepo(e.target.value)} placeholder="e.g. marketing-site" /></label></div><label>Branch<input value={props.branch} onChange={(e: any) => props.setBranch(e.target.value)} /></label><div className="target-chip"><Link2 size={13} /> <span>{target}</span></div><div className="pat-box"><div className="pat-head" onClick={() => setPatOpen(!patOpen)}><KeyRound size={15} /><span><b>Need a fine-grained token?</b><small>Steps to create one</small></span><ChevronDown size={15} className={patOpen ? "spin" : ""} /></div>{patOpen && <ol className="pat-steps"><li>Go to <a href="https://github.com/settings/personal-access-tokens/new?scopes=" target="_blank" rel="noreferrer">github.com/settings/tokens</a> → <b>Generate new token</b>.</li><li>Choose <b>Fine-grained tokens</b>.</li><li>Under <b>Repository access</b>, pick the repo(s) you want to preview.</li><li>Under <b>Permissions</b> set <b>Contents → Read-only</b> and <b>Issues → Read and write</b>.</li><li>Generate, then paste the <code>github_pat_…</code> token into the field below.</li><li>Reuse it across sessions in this tab, or remove it after the link is minted — it stays in your browser.</li></ol>}</div><label>GitHub fine-grained token<div className="input-icon"><KeyRound size={15} /><input type="password" value={props.token} onChange={(e: any) => props.setToken(e.target.value)} placeholder="github_pat_••••••••••" /></div><small className="hint">Needs <b>Contents: Read</b> to serve files and <b>Issues: Write</b> to accept bug reports.</small></label><div className="form-title second"><span className="step-badge">02</span><span><b>Protect your link</b><small>Share the PIN separately</small></span></div><label>Session PIN<div className="input-icon"><LockKeyhole size={15} /><input type="password" value={props.pin} onChange={(e: any) => props.setPin(e.target.value)} placeholder="At least 6 characters" /></div></label>{props.error && <div className="error">{props.error}</div>}<button className="primary full" onClick={props.generate}>Generate magic link <ArrowRight size={17} /></button>{props.link && <div className="link-result"><small>YOUR SECURE QA LINK</small><div><span>{props.link.slice(0, 42)}…</span><button onClick={props.copyLink}>{props.copied ? <Check size={16} /> : <Clipboard size={16} />}</button></div><button className="launch" onClick={props.onLaunch}>Open preview <ArrowRight size={14} /></button></div>}</div></div></main>;
 }
 
-function Viewer({ repo, branch, token, onExit }: { repo: string; branch: string; token: string; onExit: () => void }) {
+function Viewer({ repo, branch, path, token, onExit }: { repo: string; branch: string; path: string; token: string; onExit: () => void }) {
   const [warning, setWarning] = useState("");
   const [reportOpen, setReportOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -142,11 +150,13 @@ function Viewer({ repo, branch, token, onExit }: { repo: string; branch: string;
   const [submitting, setSubmitting] = useState(false);
   const [issueUrl, setIssueUrl] = useState("");
   const [reportError, setReportError] = useState("");
+  const [sandboxLoaded, setSandboxLoaded] = useState(false);
   const [owner, repoName] = repo.split("/");
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const base = import.meta.env.BASE_URL || "/";
   const baseRoot = base.endsWith("/") ? base : base + "/";
-  const sandboxUrl = `${baseRoot}sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/index.html`;
+  const dir = path ? path.replace(/^\/+|\/+$/g, "") + "/" : "";
+  const sandboxUrl = `${baseRoot}sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/${dir}index.html`;
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
     console.log("[edgeqa] registering service worker at", `${baseRoot}edgeqa-sw.js`);
@@ -194,7 +204,7 @@ function Viewer({ repo, branch, token, onExit }: { repo: string; branch: string;
       setSubmitting(false);
     }
   };
-  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}>🐞 Report a bug</button></div></div><div className="viewer-body"><iframe ref={iframeRef} id="sandbox" title="EdgeQA repository sandbox" src={sandboxUrl} /><div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Sandbox ready</h2><p>Connect a repository to load <b>{repo}</b> on the <b>{branch}</b> branch.</p><button className="primary" onClick={onExit}>Configure repository <ArrowRight size={16} /></button><small>Service Worker VFS · Token held in memory</small></div></div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}>🐞<span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div>{issueUrl ? <div className="report-done"><div className="empty-icon"><Check size={22} /></div><h3>Issue filed ✓</h3><p>Filed against <b>{repo}</b> with session context attached.</p><a className="issue-link" href={issueUrl} target="_blank" rel="noreferrer">View on GitHub <ArrowRight size={13} /></a><button className="ghost" onClick={() => setIssueUrl("")}>File another</button></div> : <><label>Short title<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe the bug and what you expected instead…" rows={6} /></label>{reportError && <div className="error">{reportError}</div>}<button className="primary full" disabled={submitting || !title.trim()} onClick={submitIssue}>{submitting ? "Filing issue…" : "Create GitHub issue"}{!submitting && <ArrowRight size={16} />}</button><p className="report-context">Filed against <b>{repo}</b> · current path, viewport, and UA attached automatically.</p></>}</aside></div>;
+  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}{path ? `/${path}` : ""}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}>🐞 Report a bug</button></div></div><div className="viewer-body"><iframe ref={iframeRef} id="sandbox" title="EdgeQA repository sandbox" src={sandboxUrl} onLoad={() => setSandboxLoaded(true)} />{!sandboxLoaded && <div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Loading preview…</h2><p>{token ? <>Unlocking <b>{repo}</b> on the <b>{branch}</b> branch.</> : <>Opening the public demo for <b>{repo}</b>.</>}</p><small>Service Worker VFS · {token ? "Token held in memory" : "No token needed for public repos"}</small></div>}</div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}>🐞<span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div>{!token ? <div className="report-done"><div className="empty-icon"><Link2 size={22} /></div><h3>Demo session</h3><p>You're previewing a public repo without a token, so filing to GitHub is disabled here. Want to report what you found?</p><a className="issue-link" href={`https://github.com/${owner || "owner"}/${repoName || "repo"}/issues/new`} target="_blank" rel="noreferrer">Open an issue on the repo <ArrowRight size={13} /></a><button className="ghost" onClick={() => setReportOpen(false)}>Close</button></div> : issueUrl ? <div className="report-done"><div className="empty-icon"><Check size={22} /></div><h3>Issue filed ✓</h3><p>Filed against <b>{repo}</b> with session context attached.</p><a className="issue-link" href={issueUrl} target="_blank" rel="noreferrer">View on GitHub <ArrowRight size={13} /></a><button className="ghost" onClick={() => setIssueUrl("")}>File another</button></div> : <><label>Short title<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe the bug and what you expected instead…" rows={6} /></label>{reportError && <div className="error">{reportError}</div>}<button className="primary full" disabled={submitting || !title.trim()} onClick={submitIssue}>{submitting ? "Filing issue…" : "Create GitHub issue"}{!submitting && <ArrowRight size={16} />}</button><p className="report-context">Filed against <b>{repo}</b> · current path, viewport, and UA attached automatically.</p></>}</aside></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
