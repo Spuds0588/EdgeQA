@@ -151,6 +151,7 @@ function Viewer({ repo, branch, path, token, onExit }: { repo: string; branch: s
   const [issueUrl, setIssueUrl] = useState("");
   const [reportError, setReportError] = useState("");
   const [sandboxLoaded, setSandboxLoaded] = useState(false);
+  const [swReady, setSwReady] = useState(false);
   const [owner, repoName] = repo.split("/");
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const base = import.meta.env.BASE_URL || "/";
@@ -158,11 +159,29 @@ function Viewer({ repo, branch, path, token, onExit }: { repo: string; branch: s
   const dir = path ? path.replace(/^\/+|\/+$/g, "") + "/" : "";
   const sandboxUrl = `${baseRoot}sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/${dir}index.html`;
   useEffect(() => {
-    if (!("serviceWorker" in navigator)) return;
+    if (!("serviceWorker" in navigator)) {
+      setSwReady(true);
+      return;
+    }
     console.log("[edgeqa] registering service worker at", `${baseRoot}edgeqa-sw.js`);
-    navigator.serviceWorker.register(`${baseRoot}edgeqa-sw.js`).then(() => navigator.serviceWorker.ready).then((registration) => {
-      if (token) registration.active?.postMessage({ type: "SET_TOKEN", scope: `${repo}/${branch}`, token });
-    });
+    navigator.serviceWorker.register(`${baseRoot}edgeqa-sw.js`)
+      .then(() => navigator.serviceWorker.ready)
+      .then(async (registration) => {
+        if (token) registration.active?.postMessage({ type: "SET_TOKEN", scope: `${repo}/${branch}`, token });
+        // wait until the SW controls this page (clients.claim) so the very first
+        // sandbox navigation is intercepted instead of hitting the static host
+        if (!navigator.serviceWorker.controller) {
+          await Promise.race([
+            new Promise<void>((resolve) => {
+              const done = () => resolve();
+              navigator.serviceWorker.addEventListener("controllerchange", done, { once: true });
+              if (navigator.serviceWorker.controller) { navigator.serviceWorker.removeEventListener("controllerchange", done); resolve(); }
+            }),
+            new Promise((resolve) => setTimeout(resolve, 3000)),
+          ]);
+        }
+        setSwReady(true);
+      });
     const handler = (event: MessageEvent) => {
       if (event.data?.type === "EDGEQA_WARNING") { console.warn("[edgeqa]", event.data.message); setWarning(event.data.message); }
     };
@@ -204,7 +223,7 @@ function Viewer({ repo, branch, path, token, onExit }: { repo: string; branch: s
       setSubmitting(false);
     }
   };
-  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}{path ? `/${path}` : ""}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}>🐞 Report a bug</button></div></div><div className="viewer-body"><iframe ref={iframeRef} id="sandbox" title="EdgeQA repository sandbox" src={sandboxUrl} onLoad={() => setSandboxLoaded(true)} />{!sandboxLoaded && <div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Loading preview…</h2><p>{token ? <>Unlocking <b>{repo}</b> on the <b>{branch}</b> branch.</> : <>Opening the public demo for <b>{repo}</b>.</>}</p><small>Service Worker VFS · {token ? "Token held in memory" : "No token needed for public repos"}</small></div>}</div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}>🐞<span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div>{!token ? <div className="report-done"><div className="empty-icon"><Link2 size={22} /></div><h3>Demo session</h3><p>You're previewing a public repo without a token, so filing to GitHub is disabled here. Want to report what you found?</p><a className="issue-link" href={`https://github.com/${owner || "owner"}/${repoName || "repo"}/issues/new`} target="_blank" rel="noreferrer">Open an issue on the repo <ArrowRight size={13} /></a><button className="ghost" onClick={() => setReportOpen(false)}>Close</button></div> : issueUrl ? <div className="report-done"><div className="empty-icon"><Check size={22} /></div><h3>Issue filed ✓</h3><p>Filed against <b>{repo}</b> with session context attached.</p><a className="issue-link" href={issueUrl} target="_blank" rel="noreferrer">View on GitHub <ArrowRight size={13} /></a><button className="ghost" onClick={() => setIssueUrl("")}>File another</button></div> : <><label>Short title<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe the bug and what you expected instead…" rows={6} /></label>{reportError && <div className="error">{reportError}</div>}<button className="primary full" disabled={submitting || !title.trim()} onClick={submitIssue}>{submitting ? "Filing issue…" : "Create GitHub issue"}{!submitting && <ArrowRight size={16} />}</button><p className="report-context">Filed against <b>{repo}</b> · current path, viewport, and UA attached automatically.</p></>}</aside></div>;
+  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}{path ? `/${path}` : ""}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}>🐞 Report a bug</button></div></div><div className="viewer-body">{swReady && <iframe ref={iframeRef} id="sandbox" title="EdgeQA repository sandbox" src={sandboxUrl} onLoad={() => setSandboxLoaded(true)} />}{!sandboxLoaded && <div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Loading preview…</h2><p>{token ? <>Unlocking <b>{repo}</b> on the <b>{branch}</b> branch.</> : <>Opening the public demo for <b>{repo}</b>.</>}</p><small>Service Worker VFS · {token ? "Token held in memory" : "No token needed for public repos"}</small></div>}</div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}>🐞<span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div>{!token ? <div className="report-done"><div className="empty-icon"><Link2 size={22} /></div><h3>Demo session</h3><p>You're previewing a public repo without a token, so filing to GitHub is disabled here. Want to report what you found?</p><a className="issue-link" href={`https://github.com/${owner || "owner"}/${repoName || "repo"}/issues/new`} target="_blank" rel="noreferrer">Open an issue on the repo <ArrowRight size={13} /></a><button className="ghost" onClick={() => setReportOpen(false)}>Close</button></div> : issueUrl ? <div className="report-done"><div className="empty-icon"><Check size={22} /></div><h3>Issue filed ✓</h3><p>Filed against <b>{repo}</b> with session context attached.</p><a className="issue-link" href={issueUrl} target="_blank" rel="noreferrer">View on GitHub <ArrowRight size={13} /></a><button className="ghost" onClick={() => setIssueUrl("")}>File another</button></div> : <><label>Short title<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe the bug and what you expected instead…" rows={6} /></label>{reportError && <div className="error">{reportError}</div>}<button className="primary full" disabled={submitting || !title.trim()} onClick={submitIssue}>{submitting ? "Filing issue…" : "Create GitHub issue"}{!submitting && <ArrowRight size={16} />}</button><p className="report-context">Filed against <b>{repo}</b> · current path, viewport, and UA attached automatically.</p></>}</aside></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
