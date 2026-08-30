@@ -29,6 +29,27 @@ const mime = { html: "text/html", css: "text/css", scss: "text/css", sass: "text
 const BABEL_URL = "https://unpkg.com/@babel/standalone@7.26.4/babel.min.js";
 const ESM_CDN = "https://esm.sh/";
 const presetByScope = new Map();
+// Per-scope build-tier config: framework preset, source-path aliases ("@" -> "src"),
+// top-level local dirs (for bare "src/..." imports), the site root (for package.json
+// version pinning), and the lazily-fetched dependency version map.
+const aliasByScope = new Map();
+const localDirsByScope = new Map();
+const siteRootByScope = new Map();
+const depVersionsByScope = new Map();
+const publicByScope = new Map(); // tokenless sessions the generator verified as public
+
+// Resolve a site-root-relative target path from a module's (served) directory — the
+// same "relative to the importing module" semantics Vite gives aliases/baseUrl imports.
+function relFrom(fromDir, toPath) {
+  const from = fromDir ? fromDir.split("/") : [];
+  const to = toPath.split("/");
+  let i = 0;
+  while (i < from.length && i < to.length && from[i] === to[i]) i++;
+  const ups = from.length - i;
+  const down = to.slice(i).join("/");
+  // Browsers require relative specifiers to start with "./" or "../" — a bare name is an error.
+  return ups ? "../".repeat(ups) + down : down ? "./" + down : ".";
+}
 
 // importScripts() is only legal in a service worker during install/evaluation, so load
 // @babel/standalone lazily on first transpile via fetch + indirect eval (runs in the worker
@@ -58,23 +79,58 @@ async function ensureBabel() {
   }
 }
 
-// Rewrite bare npm specifiers (react, react-dom/client, @tanstack/react-query, …) to
-// absolute esm.sh URLs — esm.sh resolves subpaths/versions and bundles each package, so
-// any dependency a real source app imports works here. Relative (./), absolute (/),
-// and URL (https:/data:...) specifiers are left untouched.
-function rewriteBareImports(js) {
+// Rewrite bare specifiers to what the browser can actually fetch.
+//   * Local dirs ("src/services") and aliases ("@/x", "$lib/y") resolve relative to the
+//     importing module — Vite's alias/baseUrl semantics, no import map needed.
+//   * Everything else is an npm package: rewritten to absolute esm.sh URLs, pinned to
+//     the repo's package.json version when known (esm.sh serves the LATEST by default,
+//     which breaks apps built against older pins).
+// Relative (./), absolute (/), and URL (https:/data:...) specifiers are left untouched.
+function rewriteBareImports(js, cfg) {
+  cfg = cfg || {};
   return js.replace(/((?:from\s+|import\s*\(|(?:^|[\n]\s*)import\s+|export\s+[^;]*?from\s+))(["'])([^\s"']+)(\2)/g, (m, ctx, q, spec, endq) => {
-    if (spec && !spec.startsWith(".") && !spec.startsWith("/") && !/^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) {
-      return `${ctx}${q}${ESM_CDN}${spec}${endq}`;
+    if (!spec || spec.startsWith(".") || spec.startsWith("/") || /^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) return m;
+    // Local dirs and aliases are relative to the *site root* (the sandbox document dir),
+    // so targets are prefixed with it before computing the module-relative path.
+    const rootPrefix = cfg.siteRoot ? cfg.siteRoot + "/" : "";
+    const first = spec.split("/")[0];
+    if (cfg.localDirs && cfg.localDirs.includes(first)) {
+      return `${ctx}${q}${relFrom(cfg.dir || "", rootPrefix + spec)}${endq}`;
     }
-    return m;
+    // source aliases: "@/x" -> <aliasRoot>/x, "$lib/y" -> src/lib/y (relative to module)
+    if (cfg.aliasMap) {
+      for (const [key, root] of Object.entries(cfg.aliasMap)) {
+        if (spec === key || spec.startsWith(key + "/")) {
+          const rest = spec.slice(key.length).replace(/^\/+/, "");
+          return `${ctx}${q}${relFrom(cfg.dir || "", rootPrefix + (root ? root + "/" + rest : rest))}${endq}`;
+        }
+      }
+    }
+    let url = ESM_CDN + spec;
+    // The npm package name is the first segment (react/jsx-runtime -> react) or the first two
+    // for scoped packages (@s/p/sub -> @s/p). Pinning the PACKAGE keeps subpaths and the
+    // framework's own runtime (react vs react/jsx-runtime) on the SAME version — a mismatch
+    // breaks hooks.
+    const pkgName = spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0];
+    const pkgVer = cfg.depVersions && (cfg.depVersions[spec] || cfg.depVersions[pkgName]);
+    // Workspace/file/link specs aren't npm versions — skip the pin and let esm.sh resolve latest.
+    if (pkgVer && !/^(workspace|file|link|npm|github):/i.test(pkgVer)) {
+      const sub = spec.slice(pkgName.length).replace(/^\//, "");
+      url = `${ESM_CDN}${pkgName}@${encodeURIComponent(pkgVer)}${sub ? "/" + sub : ""}`;
+    }
+    // Pin the framework runtime as a peer dep of every import so transitive packages
+    // (e.g. a UI lib importing react) resolve to the app's react/react-dom instead of
+    // esm.sh's latest — otherwise two React copies break hooks. The framework packages
+    // themselves (already pinned by version) are skipped.
+    if (cfg.pinDeps && !cfg.pinDeps.includes(pkgName + "@")) url += "?deps=" + cfg.pinDeps;
+    return `${ctx}${q}${url}${endq}`;
   });
 }
 
 // Transpile JSX/TSX and rewrite CSS imports into stylesheet-link injectors (vite style
-// `import "./App.css"`). Any remaining bare imports are rewritten to esm.sh so the browser
-// resolves them without an import map.
-function transpileModule(code, path, extraDir) {
+// `import "./App.css"`). Any remaining bare imports are rewritten (aliases/local dirs to
+// relative paths, npm packages to esm.sh) so the browser resolves them without an import map.
+function transpileModule(code, path, extraDir, cfg) {
   const isTs = /\.tsx?$/i.test(path);
   const presets = isTs ? [["react", { runtime: "automatic" }], "typescript"] : [["react", { runtime: "automatic" }]];
   const plugins = [["proposal-decorators", { legacy: true }], ["proposal-class-properties", { loose: true }]];
@@ -88,22 +144,48 @@ function transpileModule(code, path, extraDir) {
   if (extraDir) {
     js = js.replace(/((?:from\s+|import\s*\(|import\s+|export\s+[^;]*?from\s+))(["'])((?:\.\.?\/)[^"']*)/g, (m, ctx, q, rel) => `${ctx}${q}./${extraDir}/${rel}`);
   }
-  return postProcessJs(js);
+  return postProcessJs(js, cfg);
+}
+
+// Vite injects import.meta.env into every module; transpiled source still references it.
+// Provide a module-scoped shim (production semantics) so `import.meta.env.MODE` and friends
+// don't crash real apps. Real VITE_* vars are unknowable here — they read as undefined.
+function shimEnv(js) {
+  if (!/import\.meta\.env/.test(js)) return js;
+  const shim = 'const __edgeqa_env = { MODE: "production", DEV: false, PROD: true, SSR: false, BASE_URL: "/" };';
+  return shim + "\n" + js.replace(/import\.meta\.env(?=[^A-Za-z0-9_$])/g, "__edgeqa_env");
 }
 
 // Shared per-module post-processing for the JSX/plain-JS tiers served directly by this
 // worker: Vite-style CSS imports become stylesheet-link injectors, image/asset imports
-// become URL strings, and any remaining bare npm imports are rewritten to esm.sh.
-// (Vue/Svelte output is post-processed on the page instead — see frame.ts.)
-function postProcessJs(js) {
+// become URL strings, and bare imports are rewritten (aliases/local dirs relative,
+// npm packages to esm.sh). extraDir offsets CSS/asset URLs for directory-index modules
+// served at extensionless URLs. (Vue/Svelte output is post-processed on the page instead —
+// see frame.ts.)
+// A CSS import can reference a package file (import "pkg/style.css") — those need the same
+// bare-import treatment (esm.sh + version pin) as JS imports, since the browser resolves
+// bare specifiers as relative paths and 404s.
+function rewriteAssetUrl(url, cfg) {
+  if (url.startsWith(".") || url.startsWith("/") || /^[a-z][a-z0-9+.\-]*:/i.test(url)) return url;
+  const out = { spec: url };
+  // Reuse the bare-import decision by faking a single import line.
+  const fake = `import x from ${JSON.stringify(url)}`;
+  const rewritten = rewriteBareImports(fake, cfg);
+  const m = rewritten.match(/from ([\"'])(.*?)\1/);
+  return m ? m[2] : url;
+}
+
+function postProcessJs(js, cfg, extraDir) {
+  js = shimEnv(js);
+  const offset = (u) => (extraDir ? `./${extraDir}/${u}` : u);
   const cssUrls = [];
-  js = js.replace(/(?:import\s+(?:[^'"]*?\s+from\s+)?)(['"])([^'"]+?\.(?:css|scss|sass|less|styl))\1/g, (m, q, url) => { cssUrls.push(url); return ""; });
-  js = js.replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+(['"])([^'"]+?\.(?:png|jpe?g|gif|webp|svg|ico|avif|bmp|mp4|webm|mp3|wav|ogg|woff2?|ttf|eot))\2/g, (m, name, q, url) => `const ${name} = new URL(${q}${url}${q}, import.meta.url).href;`);
+  js = js.replace(/(?:import\s+(?:[^'"]*?\s+from\s+)?)(['"])([^'"]+?\.(?:css|scss|sass|less|styl))\1/g, (m, q, url) => { cssUrls.push(offset(rewriteAssetUrl(url, cfg))); return ""; });
+  js = js.replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+(['"])([^'"]+?\.(?:png|jpe?g|gif|webp|svg|ico|avif|bmp|mp4|webm|mp3|wav|ogg|woff2?|ttf|eot))\2/g, (m, name, q, url) => `const ${name} = new URL(${q}${offset(url)}${q}, import.meta.url).href;`);
   if (cssUrls.length) {
     const injector = cssUrls.map((u) => `(()=>{const l=document.createElement("link");l.rel="stylesheet";l.href=new URL(${JSON.stringify(u)},import.meta.url).href;document.head.appendChild(l);})();`).join("");
     js = injector + js;
   }
-  return rewriteBareImports(js);
+  return rewriteBareImports(js, cfg);
 }
 
 // ---- Vue/Svelte compile delegation to the app page ---------------------------------
@@ -113,7 +195,7 @@ function postProcessJs(js) {
 // resolves the pending fetch. Fails safe to the raw file if no page answers in time.
 const compileSeq = { n: 0 };
 const compilePending = new Map();
-function compileViaClient(preset, code, path) {
+function compileViaClient(preset, code, path, ctx) {
   return new Promise((resolve) => {
     const id = "c" + (++compileSeq.n);
     const timeout = setTimeout(() => {
@@ -122,7 +204,7 @@ function compileViaClient(preset, code, path) {
       resolve({ ok: false });
     }, 15000);
     compilePending.set(id, { path, resolve: (ok, out) => { clearTimeout(timeout); resolve(ok ? { ok: true, code: out } : { ok: false }); } });
-    self.clients.matchAll().then((clis) => clis.forEach((c) => c.postMessage({ type: "EDGEQA_COMPILE_REQUEST", id, preset, code, path })));
+    self.clients.matchAll().then((clis) => clis.forEach((c) => c.postMessage({ type: "EDGEQA_COMPILE_REQUEST", id, preset, code, path, ctx })));
   });
 }
 
@@ -136,28 +218,34 @@ function transformHtml(html) {
 
 // Returns a transformed Response, or null when no transform applies (or the compiler for the
 // active preset is unavailable) so the caller serves the original bytes.
-async function applyPreset(res, info, extraDir, preset) {
+async function applyPreset(res, info, extraDir, preset, cfg) {
   try {
     const p = info.path;
     if (/\.html?$/i.test(p)) {
       const text = await res.text();
-      return new Response(transformHtml(text) + "<!--SW-DONE-->", { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+      // Source apps are written for Vite dev's "/" URL, so client-side routers (React
+      // Router, Vue Router…) see a pathname they have routes for. Rewrite the address to
+      // "/" after load — document baseURI is unchanged, so relative module/asset URLs
+      // keep resolving against the real file, and the original path survives as data
+      // attribute for bug reports.
+      const routerFix = `<script>try{(function(){var p=location.pathname;if(p!=="/"){history.replaceState(null,"","/");document.documentElement.setAttribute("data-edgeqa-path",p);}})()}catch(e){}</script>`;
+      return new Response(transformHtml(text) + routerFix + "<!--SW-DONE-->", { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
     const jsResp = (marker, body) => new Response(marker + body, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
     if (preset === "svelte" && /\.svelte$/i.test(p)) {
       const text = await res.text();
-      const r = await compileViaClient("svelte", text, p);
+      const r = await compileViaClient("svelte", text, p, cfg);
       return jsResp(r.ok ? "/*SW-SVELTE*/" : "/*SW-SVELTE-FAIL*/", r.ok ? r.code : text);
     }
     if (preset === "vue" && /\.vue$/i.test(p)) {
       const text = await res.text();
-      const r = await compileViaClient("vue", text, p);
+      const r = await compileViaClient("vue", text, p, cfg);
       return jsResp(r.ok ? "/*SW-VUE*/" : "/*SW-VUE-FAIL*/", r.ok ? r.code : text);
     }
     if (/\.(jsx|tsx|ts)$/i.test(p)) {
       const text = await res.text();
       if (!(await ensureBabel())) return jsResp("/*SW-BABEL-FAIL*/", text);
-      return jsResp("/*SW-TRANSPILED*/", transpileModule(text, p, extraDir));
+      return jsResp("/*SW-TRANSPILED*/", transpileModule(text, p, extraDir, cfg));
     }
     // Plain ESM source (.js/.mjs) that isn't a build artifact: no JSX/SFC to transpile, but
     // still run the shared post-processing (CSS/asset imports -> injectors/URLs, bare npm
@@ -165,10 +253,37 @@ async function applyPreset(res, info, extraDir, preset) {
     // build output folders so committed bundles pass through untouched.
     if (/\.(js|mjs)$/i.test(p) && !/(^|\/)(dist|build|out|output|bundles|bundle)\/|(^|\/)(dist|bundle)[^/]*\.js/i.test(p)) {
       const text = await res.text();
-      return jsResp("/*SW-REWRITTEN*/", postProcessJs(text));
+      return jsResp("/*SW-REWRITTEN*/", postProcessJs(text, cfg, extraDir));
     }
   } catch (error) { log("preset transform failed", info.path, preset, String(error)); }
   return null;
+}
+
+// Lazily fetch the app-root package.json for a scope and build a name -> version map so
+// esm.sh rewrites pin the versions the repo actually uses (esm.sh's default is latest,
+// which breaks apps pinned to older releases). Cached per scope.
+async function depVersionsFor(info) {
+  const scope = scopeOf(info);
+  if (depVersionsByScope.has(scope)) return depVersionsByScope.get(scope);
+  const siteRoot = siteRootByScope.get(scope) || "";
+  const token = tokenByScope.get(scope);
+  let pkg = null;
+  try {
+    if (token) {
+      const ep = `https://api.github.com/repos/${encodeURIComponent(info.owner)}/${encodeURIComponent(info.repo)}/contents/${siteRoot ? siteRoot + "/" : ""}package.json?ref=${encodeURIComponent(info.branch)}`;
+      const res = await fetch(ep, { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const item = await res.json();
+        if (item && item.content) pkg = JSON.parse(new TextDecoder().decode(decodeBase64(item.content)));
+      }
+    } else {
+      const raw = await fetch(`https://raw.githubusercontent.com/${info.owner}/${info.repo}/${info.branch}/${siteRoot ? siteRoot + "/" : ""}package.json`);
+      if (raw.ok) pkg = await raw.json();
+    }
+  } catch { pkg = null; }
+  const map = pkg ? { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) } : null;
+  depVersionsByScope.set(scope, map);
+  return map;
 }
 
 self.addEventListener("install", () => { log("install: skipping wait"); self.skipWaiting(); });
@@ -187,8 +302,15 @@ self.addEventListener("message", (event) => {
   if (type === "SET_TOKEN" && scope && event.data.token && !tokenByScope.has(scope)) {
     tokenByScope.set(scope, event.data.token); log("session unlocked for", scope);
   }
+  if (type === "SET_PUBLIC" && scope && event.data.public) {
+    publicByScope.set(scope, true); log("verified-public session", scope);
+  }
   if (type === "SET_PRESET" && scope && event.data.preset) {
-    presetByScope.set(scope, event.data.preset); log("preset", event.data.preset, "for", scope);
+    presetByScope.set(scope, event.data.preset);
+    if (event.data.alias && typeof event.data.alias === "object") aliasByScope.set(scope, event.data.alias);
+    if (Array.isArray(event.data.localDirs) && event.data.localDirs.length) localDirsByScope.set(scope, event.data.localDirs);
+    if (event.data.siteRoot) siteRootByScope.set(scope, String(event.data.siteRoot).replace(/^\/+|\/+$/g, ""));
+    log("preset", event.data.preset, "for", scope, "alias", event.data.alias ? JSON.stringify(event.data.alias) : "-", "local", event.data.localDirs ? event.data.localDirs.join(",") : "-");
   }
   if (type === "EDGEQA_COMPILE_RESPONSE") {
     const pending = compilePending.get(event.data.id);
@@ -301,9 +423,13 @@ self.addEventListener("fetch", (event) => {
     // Build-tier module resolution: source repos import modules extensionless and by
     // directory (./c -> ./c.jsx, ./people -> ./people/index.tsx). Only when a preset is
     // active, after a genuine miss, and for non-document requests, so SPA routes still
-    // fall through to their index.html instead of being mis-resolved as modules.
+    // fall through to their index.html instead of being mis-resolved as modules. The
+    // gate uses known asset/stylesheet extensions only — unknown suffixes like `.gen`
+    // (TanStack Router route trees) are modules, not assets.
+    const BINARY_ASSET_RE = /\.(?:png|jpe?g|gif|webp|svg|ico|avif|bmp|mp4|webm|mp3|wav|ogg|woff2?|ttf|eot|wasm|zip|pdf)$/i;
+    const DOC_LIKE_RE = /\.(?:css|scss|sass|less|styl|html?|json|map|txt)$/i;
     let extraDir = "";
-    if (preset && !response && !looksLikeAsset && event.request.destination !== "document") {
+    if (preset && !response && !BINARY_ASSET_RE.test(info.path) && !DOC_LIKE_RE.test(info.path) && event.request.destination !== "document") {
       const requestPath = info.path;
       const resolved = await resolveModule(info, token);
       if (resolved) {
@@ -322,9 +448,24 @@ self.addEventListener("fetch", (event) => {
       if (!response) response = await githubFileSafe({ ...info, path: "index.html" }, token);
     }
     // Experimental build tier: when this scope carries a preset, transform the response
-    // (transpile JSX/TSX, compile Vue/Svelte, rewrite the HTML) before caching.
+    // (transpile JSX/TSX, compile Vue/Svelte, rewrite the HTML) before caching. The
+    // rewrite config carries the module's served dir, aliases, local dirs, and the
+    // repo's pinned dependency versions (fetched lazily from package.json).
     if (preset && response && response.status === 200) {
-      const transformed = await applyPreset(response, info, extraDir, preset);
+      const depVersions = await depVersionsFor(info);
+      let servedDir = "";
+      if (info.path.includes("/")) {
+        servedDir = info.path.slice(0, info.path.lastIndexOf("/"));
+        if (extraDir) servedDir = servedDir.replace(new RegExp(`/${extraDir.replace(/\//g, "\\/")}$`), "");
+      }
+      const dv = depVersions || {};
+      const pin = (name) => (dv[name] && !/^(workspace|file|link|npm|github):/i.test(dv[name]) ? `${name}@${encodeURIComponent(dv[name])}` : "");
+      // The runtime frameworks the app pins (and their dom/client halves) become peer-deps
+      // of every esm.sh import so the whole graph shares ONE copy (duplicates break hooks).
+      const frameworkPins = preset === "vue" ? ["vue"] : preset === "svelte" ? ["svelte"] : ["react", "react-dom", "preact"];
+      const pinDeps = frameworkPins.map(pin).filter(Boolean).join(",");
+      const cfg = { dir: servedDir, aliasMap: aliasByScope.get(scopeOf(info)), localDirs: localDirsByScope.get(scopeOf(info)), depVersions, siteRoot: siteRootByScope.get(scopeOf(info)) || "", pinDeps };
+      const transformed = await applyPreset(response, info, extraDir, preset, cfg);
       if (transformed) { log("preset", preset, "applied to", info.path); response = transformed; }
     }
     if (response && response.status === 429) {
@@ -336,11 +477,13 @@ self.addEventListener("fetch", (event) => {
       if (cached) { log("refetch failed — serving cached copy", info.path); return cached; }
       const plain404 = new Response("Not found", { status: 404, headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" } });
       if (token) { log("no web app", info.path); return looksLikeAsset ? plain404 : new Response(WEB_ROOTS_MISSING_HTML, { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } }); }
-      // Tokenless and GitHub anonymous fetch came up empty: this is a private repo (or
-      // has no public web content at this entry). Keep the preview locked rather than proxy
-      // material we couldn't fetch — the token behind the session PIN unlocks it. Only the
-      // document itself gets the locked page; subresources fail cleanly as 404s so scripts
-      // never receive HTML bytes.
+      // Tokenless and the anonymous fetch came up empty. For sessions the generator
+      // verified as public this means the file is simply missing ("no web app"). Otherwise
+      // the repo may be private — keep the preview locked rather than proxy material we
+      // couldn't fetch; the token behind the session PIN unlocks it. Only the document
+      // itself gets these pages; subresources fail cleanly as 404s so scripts never
+      // receive HTML bytes.
+      if (publicByScope.get(scopeOf(info))) { log("no web app (verified public)", info.path); return looksLikeAsset ? plain404 : new Response(WEB_ROOTS_MISSING_HTML, { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } }); }
       log("locked, anonymous fetch failed for", scopeOf(info)); return looksLikeAsset ? plain404 : new Response(LOCKED_PAGE_HTML, { status: 401, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
     if (response.status === 200) {

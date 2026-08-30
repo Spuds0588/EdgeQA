@@ -374,6 +374,129 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(await res.text()).not.toContain("importmap");
   });
 
+  it("preset scope: @ alias imports resolve relative to the importing module", async () => {
+    const sw = makeSW(htmlFetch('import { cn } from "@/lib/utils";\nexport const x = cn(1);'), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", alias: { "@": "src" }, localDirs: ["src"], siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/App.jsx");
+    const text = await res.text();
+    expect(text).toContain(`from \"./lib/utils\"`); // @/lib/utils from src/ -> ./lib/utils
+  });
+
+  it("preset scope: alias targets are relative to the SITE ROOT, not the repo root", async () => {
+    const sw = makeSW(htmlFetch('import { cn } from "@/lib/utils";\nexport const x = 1;'), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", alias: { "@": "src" }, localDirs: ["src"], siteRoot: "frontend" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/frontend/src/lib/utils.jsx");
+    const text = await res.text();
+    // frontend/src/lib + @/lib/utils -> frontend/src/lib/utils -> ./utils
+    expect(text).toContain(`from \"./utils\"`);
+    expect(text).not.toContain("esm.sh/");
+  });
+
+  it("preset scope: bare src/... imports (vite baseUrl style) resolve relative to the module", async () => {
+    const sw = makeSW(htmlFetch('import { fetchTags } from "src/services";\nexport const x = 1;'));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "jsx", localDirs: ["src"], siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
+    const text = await res.text();
+    expect(text).toContain(`from \"./services\"`);
+    expect(text).not.toContain("esm.sh/");
+  });
+
+  it("preset scope: svelte $lib alias maps to src/lib", async () => {
+    const sw = makeSW(htmlFetch('import { l } from "$lib/localeStore";\nexport const x = 1;'), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "svelte", alias: { "$lib": "src/lib" }, localDirs: ["src"], siteRoot: "web" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/web/src/lib/foo.ts");
+    const text = await res.text();
+    expect(text).toContain(`from \"./localeStore\"`); // web/src/lib + $lib/localeStore -> ./localeStore
+  });
+
+  it("preset scope: esm.sh rewrites pin the repo's package.json versions (incl. subpaths)", async () => {
+    const pkg = JSON.stringify({ dependencies: { react: "^18.3.1", "react-dom": "^18.3.1", "lucide-react": "0.454.0" } });
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.includes("/package.json")) return ok(pkg, 200, "application/json");
+      return ok('import { jsx } from "react/jsx-runtime";\nimport { L } from "lucide-react";\nimport React from "react";\nexport const A = () => jsx(L);', 200, "text/plain");
+    });
+    const sw = makeSW(fetchMock);
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/App.js");
+    const text = await res.text();
+    expect(text).toContain(`from \"https://esm.sh/react@%5E18.3.1/jsx-runtime\"`); // subpath of pinned pkg
+    expect(text).toContain(`from \"https://esm.sh/react@%5E18.3.1\"`);
+    // non-framework import carries the framework pins as peer deps so the whole graph shares one React
+    expect(text).toContain(`from \"https://esm.sh/lucide-react@0.454.0?deps=react@%5E18.3.1,react-dom@%5E18.3.1\"`);
+  });
+
+  it("preset scope: scoped subpath pins after the full package name", async () => {
+    const pkg = JSON.stringify({ dependencies: { "@hookform/resolvers": "^3.9.0" } });
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.includes("/package.json")) return ok(pkg, 200, "application/json");
+      return ok('import { yupResolver } from "@hookform/resolvers/yup";\nexport const r = yupResolver;', 200, "text/plain");
+    });
+    const sw = makeSW(fetchMock);
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/form.js");
+    expect(await res.text()).toContain(`from \"https://esm.sh/@hookform/resolvers@%5E3.9.0/yup\"`);
+  });
+
+  it("preset scope: workspace/file dep specs never become version pins", async () => {
+    const pkg = JSON.stringify({ dependencies: { "@applemusic-like-lyrics/core": "workspace:^", "@repo/ui": "file:../ui" } });
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.includes("/package.json")) return ok(pkg, 200, "application/json");
+      return ok('import { core } from "@applemusic-like-lyrics/core";\nimport { ui } from "@repo/ui";\nexport const x = 1;', 200, "text/plain");
+    });
+    const sw = makeSW(fetchMock);
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
+    const text = await res.text();
+    expect(text).toContain(`from \"https://esm.sh/@applemusic-like-lyrics/core\"`); // no @workspace:^ junk
+    expect(text).not.toContain("workspace:");
+  });
+
+  it("preset scope: import.meta.env gets a Vite-style shim so apps don't crash", async () => {
+    const sw = makeSW(htmlFetch('console.log(import.meta.env.MODE);\nexport const x = import.meta.env.DEV;'));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
+    const text = await res.text();
+    expect(text).toContain("__edgeqa_env = { MODE");
+    expect(text).toContain("__edgeqa_env.MODE");
+    expect(text).not.toContain("import.meta.env.MODE");
+    expect(text).not.toContain("import.meta.url"); // import.meta.url untouched
+  });
+
+  it("preset scope: build-tier HTML injects the client-side router URL fix", async () => {
+    const sw = makeSW(htmlFetch('<html><body><script type="module" src="/src/main.tsx"></script></body></html>'));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/index.html");
+    const text = await res.text();
+    expect(text).toContain("history.replaceState(null,\"\",\"/\")");
+    expect(text).toContain("data-edgeqa-path");
+  });
+
+  it("preset scope: .gen and other unknown extensions are modules, not assets", async () => {
+    const body = "export const tree = 1;";
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        if (url.endsWith("/lib/routeTree.gen.ts")) return ok(body, 200, "text/plain");
+        return ok("not found", 404, "text/plain");
+      }
+      return ok("{}", 404, "application/json");
+    });
+    const sw = makeSW(fetchMock, { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/lib/routeTree.gen");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("SW-TRANSPILED");
+  });
+
+  it("verified-public tokenless scope: missing file is 'no web app', not locked", async () => {
+    const sw = makeSW(async () => ok("not found", 404, "text/plain"));
+    await sw.message({ type: "SET_PUBLIC", scope: "acme/public-site/main", public: true });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/public-site/main/index.html");
+    expect(res.status).toBe(404);
+    const text = await res.text();
+    expect(text).toContain("Nothing to preview here");
+    expect(text).not.toContain("session PIN");
+  });
+
   it("removes stale cache versions on activate", async () => {
     const sw = makeSW(htmlFetch("<html></html>"));
     const old = await sw.caches.open("edgeqa-vfs-v1");

@@ -32,6 +32,9 @@ Staging environments are a pain. Deploying every branch to a preview host is slo
 | **SPA fallback** | Virtual 404s fall back to `index.html`, so client-side routers work. |
 | **In-context bug reporting** | A report drawer (side panel on desktop, bottom sheet on mobile) collects title + description and shows exactly what will be auto-attached (repo, branch, page, screensize, device/browser, time) before you click submit. You can also opt to **include the session's console log** (last lines, default on) — then it opens a real GitHub issue via the session token. |
 | **Tryable demo** | The tokenless live demo ([`/#demo`](https://spuds0588.github.io/EdgeQA/#demo)) previews a public example repo — a fake project-management + chat workspace with a built-in bug to find — and simulates the whole QA loop, including a fake issue submission, so visitors can experience the product before bringing their own repo. |
+| **In-browser build tier (experimental)** | Source repos — not just built sites — preview too. React, Preact, JSX/TSX (via `@babel/standalone`), Vue `.vue` SFCs, and Svelte `.svelte` (via esm.sh compiler SDKs) are transpiled/compiled in your browser. Framework is **auto-detected** from repo signals (package.json deps, `vite.config`, tsconfig, file extensions) with a manual override in the setup form. |
+| **Real dependency resolution** | Every bare npm import a real app makes is rewritten to **esm.sh pinned to the repo's package.json versions** (subpaths and transitive framework peers included), so heavy real-world dependency graphs — `@tanstack/react-query`, `react-day-picker`, `pinia`, `d3-scale`, … — resolve instead of failing. |
+| **Vite-style source resolution** | `@/`-style aliases (detected from `tsconfig.json` paths + `vite.config` aliases, `@ → src` by convention), `$lib` (SvelteKit), bare `src/...` baseUrl imports, extensionless/directory module imports (`./x` → `./x.jsx`, `./people` → `./people/index.tsx`), `import.meta.env` shim, and a client-side router URL fix so BrowserRouter/Vue Router apps boot at their home route. |
 | **Read-only share links** | Append `&readonly=1` to any session URL to hide the EdgeQA header and bug-reporting UI — a pure preview for sharing with stakeholders. |
 | **Paste-a-repo URL** | Drop in `https://github.com/acme/site` (or `acme/site`, or a `/tree/` branch URL) and the form fills itself. |
 | **Bookmarklet** | One-click pre-fill from any GitHub repo page. |
@@ -118,13 +121,16 @@ The project deploys to GitHub Pages automatically on every push to `main` via `.
 ## Project structure
 
 ```
-public/edgeqa-sw.js      Service worker: VFS interceptor, GitHub API proxy, caching, SPA fallback
+public/edgeqa-sw.js      Service worker: VFS interceptor, GitHub API proxy, caching, SPA fallback, build tier
 src/main.tsx             App shell: landing page, setup flow, unlock flow, sandbox viewer + report drawer
 src/demo-element.js      Home-page animated demo (web component, swappable via <slot name="media">)
 src/lib/repo.ts          GitHub URL → owner/repo/branch parser (unit-tested)
+src/lib/discover.ts      Repo → entry-point/framework/alias discovery (unit-tested)
+src/lib/frame.ts         Page-side Vue/Svelte compiler delegation + module rewriting
 src/index.css            Design system (dark theme, tokens)
-tests/repo.test.ts       Unit tests for the URL parser
+tests/*.test.ts          Vitest unit tests (SW, discovery, URL parser)
 tests/edgeqa.spec.ts     Playwright e2e specs
+scripts/round2.mjs       Real-repo regression harness: loads a repo preview through the real SW flow in Chromium
 .github/workflows/       GitHub Pages deploy workflow
 ```
 
@@ -139,15 +145,20 @@ tests/edgeqa.spec.ts     Playwright e2e specs
 
 Working today: link generation/decryption, the VFS service worker (with the real decrypted token handed off securely), repo-URL parsing, bookmarklet, the full landing experience, the in-context report drawer (desktop + mobile), **real GitHub issue creation** — reports are `POST`ed to the repo's Issues API with an `edgeqa-report` label; the drawer transparently shows the auto-attached session context (repo, branch, page, screensize, device/browser, time) and can include the session's **console log** (optional, on by default), with a link to the filed issue on success — **saved QA links** (opt-in per generation, PIN-encrypted in `localStorage`, with copy/open/delete and JSON **export/import backups**) — and a **tokenless live demo** (`/#demo`) that previews this repo's public `examples/northstar/` site so anyone can try the platform without a repo or PAT.
 
+Also working (experimental): the **in-browser build tier** — source repos for React / Preact / JSX+TSX / Vue / Svelte are transpiled in the browser, with framework auto-detection, `@`/`$lib` alias + baseUrl resolution from `tsconfig.json`/`vite.config`, package.json-pinned esm.sh dependency loading, and a client-side router URL fix. Round-2 testing against 20 real public repos (calendar apps, whiteboards, emulator UIs, Vue/Svelte playgrounds, the repo owner's own projects) verified real apps render; the remaining failures are documented per-repo in `scripts/round2.mjs`.
+
 Next up:
 
-- Experimental in-browser JSX/React transpilation mode (`&preset=react`).
+- Angular source preview (needs an in-browser AOT seam — currently degrades gracefully).
+- CSS-level `@import "tailwindcss"` (Tailwind v4) needs a CSS build step; the app still boots, just un-styled.
 
 ## Limitations
 
 - No server-side code execution (Node.js, PHP, API routes).
 - Apps that need injected `.env` secrets won't run in the sandbox.
-- Highly complex bundler module graphs (nested Webpack/Vite resolution) are out of scope.
+- Unpublished **workspace-only packages** (`@repo/ui`, `@tldraw/*`) can't resolve via esm.sh.
+- Packages esm.sh's build servers reject (e.g. `svelte-sonner`) won't load.
+- Angular source and highly complex bundler module graphs (nested Webpack/Vite resolution) are out of scope for now.
 
 ## Sandbox origin & CORS
 

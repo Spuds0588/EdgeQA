@@ -25,6 +25,10 @@ export interface Probe {
   sources: Candidate[];
   /** Framework detected from repo signals ("react" | "preact" | "jsx"), if any. */
   preset?: Preset;
+  /** Source-path aliases ("@" -> "src", "$lib" -> "src/lib") relative to the site root. */
+  aliases?: Record<string, string>;
+  /** Top-level source directories of the app root (for bare "src/..." style imports). */
+  localDirs?: string[];
 }
 
 const identityCache = new Map<string, { account: string; repos: { full_name: string; private: boolean; default_branch: string }[] }>();
@@ -107,26 +111,97 @@ async function treeFor(owner: string, repo: string, ref: string, token: string):
 // package.json via raw.githubusercontent for tokenless (no API budget) or the
 // contents API with a token (private repos). Only fetched when the tree already
 // looks like framework source.
-async function fetchPackageJson(owner: string, repo: string, ref: string, token: string): Promise<any | null> {
-  const key = `${owner}/${repo}/${ref}`;
-  if (pkgCache.has(key)) return pkgCache.get(key);
-  let pkg: any = null;
+// Fetch a JSON file relative to the app root (siteRoot "" = repo root). Tokenless
+// goes through raw.githubusercontent (no API budget); token-backed uses the contents
+// API so private repos resolve. Cached per scope.
+async function fetchJson(owner: string, repo: string, ref: string, token: string, siteRoot: string, file: string, cache: Map<string, any>): Promise<any | null> {
+  const key = `${owner}/${repo}/${ref}/${siteRoot}/${file}`;
+  if (cache.has(key)) return cache.get(key);
+  const root = siteRoot ? `${siteRoot.replace(/^\/+|\/+$/g, "")}/` : "";
+  let out: any = null;
   try {
     if (token) {
-      const res = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/package.json?ref=${encodeURIComponent(ref)}`, token);
+      const res = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${root}${file}?ref=${encodeURIComponent(ref)}`, token);
       if (res.status === 200 && res.json?.content) {
         const bin = atob(res.json.content.replace(/\n/g, ""));
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        pkg = JSON.parse(new TextDecoder().decode(bytes));
+        out = JSON.parse(new TextDecoder().decode(bytes));
       }
     } else {
-      const raw = await fetch(`https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(ref)}/package.json`);
-      if (raw.ok) pkg = await raw.json();
+      const raw = await fetch(`https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(ref)}/${root}${file}`);
+      if (raw.ok) out = await raw.json();
     }
-  } catch { pkg = null; }
-  pkgCache.set(key, pkg);
-  return pkg;
+  } catch { out = null; }
+  cache.set(key, out);
+  return out;
+}
+
+async function fetchPackageJson(owner: string, repo: string, ref: string, token: string, siteRoot: string): Promise<any | null> {
+  return fetchJson(owner, repo, ref, token, siteRoot, "package.json", pkgCache);
+}
+
+// Source-path aliases from tsconfig.json `compilerOptions.paths` (with baseUrl), the
+// convention nearly every Vite/TS app uses for "@/x" style imports. Returns e.g.
+// { "@": "src" } or { "@": "src", "$lib": "src/lib" }. Best-effort — a missing or
+// unusual tsconfig simply yields {} and callers fall back to conventions.
+export function aliasesFromTsconfig(tsconfig: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  const paths = tsconfig?.compilerOptions?.paths;
+  const baseUrl = String(tsconfig?.compilerOptions?.baseUrl || "").replace(/^\/\.?\//, "").replace(/^\.\//, "").replace(/\/+$/, "").replace(/^\.$/, "");
+  if (!paths || typeof paths !== "object") return out;
+  for (const [pattern, targets] of Object.entries<any>(paths)) {
+    // Only alias-style keys ("@/*", "$lib/*", "@app/*") — never bare names.
+    if (!/^[@$][^/]*\/\*$/.test(pattern)) continue;
+    const key = pattern.replace(/\/\*$/, "");
+    const value = String(Array.isArray(targets) ? targets[0] : targets || "").replace(/\/\*$/, "").replace(/^\.\//, "").replace(/\/+$/, "").replace(/^\.$/, "");
+    if (!value && !baseUrl) continue; // an empty value only makes sense with a baseUrl ("@/*" -> baseUrl itself)
+    const root = [baseUrl, value].filter(Boolean).join("/");
+    out[key] = root || key;
+  }
+  return out;
+}
+
+// Best-effort vite.config alias extraction for the common literal forms:
+//   alias: { "@": "/src" } | "@": resolve(__dirname, "./src") | "@": new URL("./src", import.meta.url)
+// The fileURLToPath(...) wrapper around new URL is skipped, but the inner URL is captured.
+export function aliasesFromViteConfig(configText: string | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!configText) return out;
+  // Grab the resolve.alias object once, then scan entries inside it — a global regex that
+  // re-anchors `alias:{` would only ever match the first entry.
+  const obj = configText.match(/alias\s*:\s*\{([\s\S]*?)\}/);
+  if (!obj) return out;
+  const re = /(["']?)([@$][^"':\s]*?)\1\s*:\s*(?:["']([^"']+)["']|new\s+URL\(\s*["']([^"']+)["']|(?:path\.)?resolve\(\s*[^,)]*,\s*["']([^"']+)["'])/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(obj[1]))) {
+    const key = m[2];
+    const raw = m[3] || m[4] || m[5];
+    if (!key || !raw) continue;
+    let value = raw.replace(/^\/+/g, "").replace(/^\.\//, ""); // "/src" or "./src" -> "src"
+    out[key] = value;
+  }
+  return out;
+}
+
+// Top-level directories of the app root subtree — the local dirs bare imports like
+// "src/services" resolve against (vite `resolve.alias`/baseUrl style). Hidden dirs
+// (.github, .vscode, …), build/output folders, and file-looking entries are excluded;
+// anything else is a candidate.
+export function topLevelDirs(tree: { path: string; type: string }[], siteRoot: string): string[] {
+  const root = siteRoot ? `${siteRoot.replace(/^\/+|\/+$/g, "")}/` : "";
+  const seen = new Set<string>();
+  for (const n of tree || []) {
+    const p = n.path || "";
+    if (!p.startsWith(root)) continue;
+    const rest = p.slice(root.length);
+    if (!rest) continue;
+    const first = rest.split("/")[0];
+    if (!first || first.includes(".") || first.startsWith(".")) continue;
+    if (/^(node_modules|vendor|dist|build|out|coverage|docs|public)$/i.test(first)) continue;
+    seen.add(first);
+  }
+  return [...seen].sort();
 }
 
 export async function probeRepo(owner: string, repo: string, branch: string, token: string): Promise<Probe> {
@@ -152,11 +227,46 @@ export async function probeRepo(owner: string, repo: string, branch: string, tok
     if (fb.length) { sources = fb; siteRoot = fb[0].doc || ""; resolved = defaultBranch; }
   }
   let preset: Preset | undefined;
+  let aliases: Record<string, string> | undefined;
+  let localDirs: string[] | undefined;
   if (looksLikeSource(tree)) {
-    const pkg = await fetchPackageJson(owner, repo, resolved, token);
+    const pkg = await fetchPackageJson(owner, repo, resolved, token, siteRoot);
     preset = detectPreset(tree, pkg) || undefined;
+    if (preset) {
+      // Alias + local-dir resolution for the in-browser build tier: tsconfig paths win,
+      // vite.config string aliases are the fallback, and conventions cover the rest
+      // ($lib -> src/lib for SvelteKit-style repos, @ -> src when a src/ dir exists).
+      const tsconfig = await fetchJson(owner, repo, resolved, token, siteRoot, "tsconfig.json", pkgCache);
+      let aliasMap = { ...aliasesFromViteConfig(await viteConfigText(owner, repo, resolved, token, siteRoot)), ...aliasesFromTsconfig(tsconfig) };
+      const dirs = topLevelDirs(tree, siteRoot);
+      if (!aliasMap["@"] && dirs.includes("src")) aliasMap["@"] = "src";
+      if (!aliasMap["$lib"] && dirs.includes("src") && tree.some((n) => (n.path || "").startsWith(siteRoot ? `${siteRoot.replace(/\/+$/, "")}/src/lib/` : "src/lib/"))) aliasMap["$lib"] = "src/lib";
+      if (Object.keys(aliasMap).length) aliases = aliasMap;
+      if (dirs.length) localDirs = dirs;
+    }
   }
-  return { branch: resolved, defaultBranch, siteRoot, public: isPublic, sources, preset };
+  return { branch: resolved, defaultBranch, siteRoot, public: isPublic, sources, preset, aliases, localDirs };
+}
+
+async function viteConfigText(owner: string, repo: string, ref: string, token: string, siteRoot: string): Promise<string | null> {
+  const root = siteRoot ? `${siteRoot.replace(/^\/+|\/+$/g, "")}/` : "";
+  for (const name of ["vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"]) {
+    try {
+      if (token) {
+        const res = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${root}${name}?ref=${encodeURIComponent(ref)}`, token);
+        if (res.status === 200 && res.json?.content) {
+          const bin = atob(res.json.content.replace(/\n/g, ""));
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          return new TextDecoder().decode(bytes);
+        }
+      } else {
+        const raw = await fetch(`https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(ref)}/${root}${name}`);
+        if (raw.ok) return await raw.text();
+      }
+    } catch { /* keep probing */ }
+  }
+  return null;
 }
 
 export async function loadIdentity(token: string): Promise<{ account: string; repos: { full_name: string; private: boolean; default_branch: string }[] }> {
