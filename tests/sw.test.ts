@@ -98,6 +98,13 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("shows a rate-limit page (not 'locked') when a tokenless GitHub fetch 429s", async () => {
+    const sw = makeSW(async () => ok("{}", 429, "application/json"));
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/public-site/main/index.html");
+    expect(res.status).toBe(429);
+    expect(await res.text()).toContain("rate-limiting");
+  });
+
   it("falls back to the cached copy when GitHub rate-limits (429)", async () => {
     const sw = makeSW(async () => ok("{}", 429, "application/json"));
     const cache = await sw.caches.open("edgeqa-vfs-v2");

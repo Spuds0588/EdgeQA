@@ -4,6 +4,7 @@ const WEB_ROOTS_MISSING_HTML = `<!doctype html><html lang="en"><head><meta chars
 // has no public web content at this entry). Keeps the session locked rather than
 // pretending a private repo is a misconfigured public one.
 const LOCKED_PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Preview locked</title></head><body style="margin:0;background:#f3f2ea;color:#18242a;font:600 15px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"><div style="max-width:560px;margin:10vh auto;padding:0 22px"><div style="font-size:28px;margin-bottom:14px">🔒</div><h1 style="font-size:20px;margin:0 0 10px">This preview needs the session PIN</h1><p style="margin:0;color:#44565c">This is a private repository (or has no public web page at this path), so it can only be unlocked with the token held behind the session PIN.</p></div></body></html>`;
+const rateLimitPage = () => new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub rate limit</title></head><body style="margin:0;background:#f3f2ea;color:#18242a;font:600 15px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"><div style="max-width:560px;margin:10vh auto;padding:0 22px"><div style="font-size:28px;margin-bottom:14px">⏳</div><h1 style="font-size:20px;margin:0 0 10px">GitHub is rate-limiting previews</h1><p style="margin:0;color:#44565c">Try again in a minute — or add a token to raise the limit. Your cached copy will be served if there is one.</p></div></body></html>`, { status: 429, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 const CACHE_NAME = "edgeqa-vfs-v2"; // bump to invalidate cached content (e.g. when the demo example changes)
 const CACHE_TTL_MS = 5 * 60 * 1000; // serve cached files for up to 5 minutes, then refetch from GitHub
 const tokenByScope = new Map();
@@ -51,7 +52,10 @@ async function githubFile(info, token) {
   const endpoint = `https://api.github.com/repos/${encodeURIComponent(info.owner)}/${encodeURIComponent(info.repo)}/contents/${info.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(info.branch)}`;
   log("fetch contents", info.path, ">", endpoint);
   const response = await fetch(endpoint, { headers });
-  if (!response.ok) { log("contents miss", info.path, response.status); return null; }
+  if (!response.ok) {
+    if (response.status === 429 || (response.status === 403 && Number(response.headers.get("x-ratelimit-remaining")) === 0)) { log("rate-limited", info.path, response.status); return rateLimitPage(); }
+    log("contents miss", info.path, response.status); return null;
+  }
   const item = await response.json();
   if (item.type !== "file") { log("not a file", info.path, item.type); return null; }
   if (item.size > 100 * 1024 * 1024) {
@@ -65,7 +69,7 @@ async function githubFile(info, token) {
   else if (item.sha) {
     log("blob fallback", info.path, item.sha);
     const blobResponse = await fetch(`https://api.github.com/repos/${info.owner}/${info.repo}/git/blobs/${item.sha}`, { headers });
-    if (!blobResponse.ok) { log("blob miss", info.path, blobResponse.status); return null; }
+    if (!blobResponse.ok) { if (blobResponse.status === 429 || (blobResponse.status === 403 && Number(blobResponse.headers.get("x-ratelimit-remaining")) === 0)) { log("rate-limited", info.path, blobResponse.status); return rateLimitPage(); } log("blob miss", info.path, blobResponse.status); return null; }
     const blob = await blobResponse.json(); body = blob.encoding === "base64" ? decodeBase64(blob.content) : new TextEncoder().encode(blob.content);
   }
   return body ? new Response(body, { headers: { "Content-Type": contentType(info.path), "Cache-Control": "no-store" } }) : null;
@@ -90,6 +94,10 @@ self.addEventListener("fetch", (event) => {
     const token = tokenByScope.get(scopeOf(info));
     let response = await githubFileSafe(info, token);
     if (!response && info.path !== "index.html") { log("spa fallback", info.path); response = await githubFileSafe({ ...info, path: "index.html" }, token); }
+    if (response && response.status === 429) {
+      if (cached) { log("rate-limited — serving cached copy", info.path); return cached; }
+      log("rate-limited", info.path); return response;
+    }
     if (!response) {
       // Refetch failed (rate limit, transient error): serve any cached copy rather than break the preview.
       if (cached) { log("refetch failed — serving cached copy", info.path); return cached; }
