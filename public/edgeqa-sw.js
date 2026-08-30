@@ -107,7 +107,17 @@ self.addEventListener("fetch", (event) => {
     if (cached) log(isHtml ? "html — refetching" : "cache stale — refetching", info.path);
     const token = tokenByScope.get(scopeOf(info));
     let response = await githubFileSafe(info, token);
-    if (!response && info.path !== "index.html") { log("spa fallback", info.path); response = await githubFileSafe({ ...info, path: "index.html" }, token); }
+    // Only document/navigation requests (routes and .html pages) get SPA fallback;
+    // a missing asset (js/css/img/json…) is a plain 404, never an HTML page in its place.
+    // Documents fall back to the nearest directory's index.html first, then repo root,
+    // so subfolder sites (docs/, DualBoy/src/, public/views/) resolve their own root.
+    const looksLikeAsset = /\.[a-z0-9]{2,6}$/i.test(info.path) && !/\.html?$/i.test(info.path);
+    if (!response && !looksLikeAsset && info.path !== "index.html") {
+      log("spa fallback", info.path);
+      const dir = info.path.slice(0, info.path.lastIndexOf("/"));
+      if (dir) response = await githubFileSafe({ ...info, path: `${dir}/index.html` }, token);
+      if (!response) response = await githubFileSafe({ ...info, path: "index.html" }, token);
+    }
     if (response && response.status === 429) {
       if (cached) { log("rate-limited — serving cached copy", info.path); return cached; }
       log("rate-limited", info.path); return response;
@@ -115,11 +125,14 @@ self.addEventListener("fetch", (event) => {
     if (!response) {
       // Refetch failed (rate limit, transient error): serve any cached copy rather than break the preview.
       if (cached) { log("refetch failed — serving cached copy", info.path); return cached; }
-      if (token) { log("no web app", info.path); return new Response(WEB_ROOTS_MISSING_HTML, { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } }); }
+      const plain404 = new Response("Not found", { status: 404, headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" } });
+      if (token) { log("no web app", info.path); return looksLikeAsset ? plain404 : new Response(WEB_ROOTS_MISSING_HTML, { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } }); }
       // Tokenless and GitHub anonymous fetch came up empty: this is a private repo (or
       // has no public web content at this entry). Keep the preview locked rather than proxy
-      // material we couldn't fetch — the token behind the session PIN unlocks it.
-      log("locked, anonymous fetch failed for", scopeOf(info)); return new Response(LOCKED_PAGE_HTML, { status: 401, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+      // material we couldn't fetch — the token behind the session PIN unlocks it. Only the
+      // document itself gets the locked page; subresources fail cleanly as 404s so scripts
+      // never receive HTML bytes.
+      log("locked, anonymous fetch failed for", scopeOf(info)); return looksLikeAsset ? plain404 : new Response(LOCKED_PAGE_HTML, { status: 401, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
     if (response.status === 200) {
       const headers = new Headers(response.headers);

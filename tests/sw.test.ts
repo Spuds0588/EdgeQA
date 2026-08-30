@@ -157,6 +157,22 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(await res.text()).toContain("needs the session PIN");
   });
 
+  it("tokenless missing asset gets a clean 404, never the locked HTML page", async () => {
+    const sw = makeSW(async () => ok("not found", 404, "text/plain"));
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/openlayers/openlayers/main/examples/examples-info.js");
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("session PIN");
+  });
+
+  it("tokenless missing asset with a cached copy serves the cached copy, not 404", async () => {
+    const sw = makeSW(async () => ok("not found", 404, "text/plain"));
+    const cache = await sw.caches.open("edgeqa-vfs-v2");
+    await cache.put(new Request("http://localhost:4173/sandbox/acme/site/main/app.js"), new Response("CACHED_JS", { headers: { "Content-Type": "application/javascript", "x-edgeqa-cached-at": String(Date.now()) } }));
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/app.js");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("CACHED_JS");
+  });
+
   it("serves the demo scope without a token", async () => {
     const sw = makeSW(htmlFetch("<html><body>DEMO</body></html>"));
     const res = await sw.fetchEvent(DEMO_HTML_URL);
@@ -174,10 +190,30 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(init?.headers?.["Authorization"]).toBe("Bearer ghp_secret");
   });
 
-  it("falls back to index.html for unknown SPA routes", async () => {
+  it("SPA route falls back to the nearest directory's index.html (subfolder sites)", async () => {
+    const calls: string[] = [];
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      calls.push(url);
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        if (url.includes("/app/dashboard")) return ok("not found", 404, "text/plain");
+        if (url.includes("/app/index.html")) return ok("<html><body>DIR_ROOT</body></html>");
+        return ok("<html><body>REPO_ROOT</body></html>");
+      }
+      return ok("{}", 404, "application/json");
+    });
+    const sw = makeSW(fetchMock);
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/app/dashboard");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("DIR_ROOT"); // nearest dir index.html wins, not repo root
+    expect(calls.some((u) => u.includes("/app/index.html"))).toBe(true);
+    expect(calls.some((u) => u.endsWith("/main/index.html"))).toBe(false); // root never consulted
+  });
+
+  it("SPA route falls back to repo-root index.html when no directory index exists", async () => {
     const fetchMock = vi.fn<FetchMock>(async (url: string) => {
       if (url.startsWith("https://raw.githubusercontent.com/")) {
-        return url.includes("/some/route") ? ok("not found", 404, "text/plain") : ok("<html><body>SPA_ROOT</body></html>");
+        if (url.includes("/some/route") || url.includes("/some/index.html")) return ok("not found", 404, "text/plain");
+        return ok("<html><body>SPA_ROOT</body></html>");
       }
       return ok("{}", 404, "application/json");
     });
@@ -185,7 +221,7 @@ describe("edgeqa-sw VFS cache strategy", () => {
     const res = await sw.fetchEvent(ROUTE_URL);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("SPA_ROOT");
-    expect(fetchMock.mock.calls.some(([u]) => u.includes("raw.githubusercontent.com") && u.includes("index.html"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([u]) => u.includes("raw.githubusercontent.com") && u.endsWith("/main/index.html"))).toBe(true);
   });
 
   it("removes stale cache versions on activate", async () => {
