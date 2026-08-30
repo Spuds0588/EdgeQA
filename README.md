@@ -27,7 +27,7 @@ Staging environments are a pain. Deploying every branch to a preview host is slo
 | **Bring-your-own-key auth** | Paste a fine-grained PAT scoped to the repo you want to preview. The token lives in memory only (never `localStorage`, never a server). |
 | **Web Crypto magic links** | The token is AES-GCM encrypted with a PIN-derived key (PBKDF2, 100k iterations) and embedded in the URL hash. |
 | **Virtual File System (VFS)** | A Service Worker intercepts sandbox requests, fetches files from the GitHub API, and serves them with correct MIME types. |
-| **Read-through cache** | Repo files are cached so reloads are instant and API rate limits are spared. |
+| **Read-through cache** | HTML pages are always refetched (pushes show up on the tester's next reload); static assets are cached for 5 minutes to spare API rate limits, with a cached fallback if GitHub is unreachable or rate-limited. |
 | **Large-asset fallback** | Handles GitHub's 1MB contents-API limit via the Git Database API (up to 100MB), and synthesizes safe placeholders for anything larger. |
 | **SPA fallback** | Virtual 404s fall back to `index.html`, so client-side routers work. |
 | **In-context bug reporting** | A report drawer (side panel on desktop, bottom sheet on mobile) collects title + description and shows exactly what will be auto-attached (repo, branch, page, screensize, device/browser, time) before you click submit. You can also opt to **include the session's console log** (last lines, default on) — then it opens a real GitHub issue via the session token. |

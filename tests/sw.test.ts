@@ -1,0 +1,174 @@
+import { readFileSync } from "node:fs";
+import { describe, it, expect, vi } from "vitest";
+
+// Load the real service worker file and evaluate it in a mocked browser-like scope,
+// so the exact production code under public/edgeqa-sw.js is what gets tested.
+const code = readFileSync(new URL("../public/edgeqa-sw.js", import.meta.url), "utf8");
+
+const DEMO_HTML_URL = "http://localhost:4173/sandbox/Spuds0588/EdgeQA/main/examples/northstar/index.html";
+const ASSET_URL = "http://localhost:4173/sandbox/Spuds0588/EdgeQA/main/assets/app.js";
+const ROUTE_URL = "http://localhost:4173/sandbox/Spuds0588/EdgeQA/main/some/route";
+
+const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
+const contentsJson = (body: string) => ({ type: "file", size: body.length, content: b64(body) });
+
+type FetchMock = (url: string, init?: { headers?: Record<string, string> }) => Promise<Response>;
+
+function makeSW(fetchImpl: FetchMock) {
+  const listeners: Record<string, ((event: any) => void)[]> = {};
+  const store = new Map<string, Map<string, Response>>();
+
+  const caches = {
+    open: async (name: string) => {
+      if (!store.has(name)) store.set(name, new Map());
+      const m = store.get(name)!;
+      return {
+        match: async (req: Request) => m.get(req.url) ?? undefined,
+        put: async (req: Request, res: Response) => void m.set(req.url, res),
+        keys: async () => [...m.keys()].map((u) => new Request(u)),
+        delete: async (req: Request) => m.delete(req.url),
+      };
+    },
+    keys: async () => [...store.keys()],
+    delete: async (name: string) => store.delete(name),
+  };
+
+  const self: any = {
+    registration: { scope: "http://localhost:4173/" },
+    skipWaiting: vi.fn(),
+    clients: { claim: vi.fn(async () => {}), matchAll: vi.fn(async () => []) },
+    addEventListener: (type: string, fn: (e: any) => void) => void (listeners[type] ||= []).push(fn),
+  };
+
+  const fn = new Function("self", "caches", "fetch", "atob", code);
+  fn(self, caches, fetchImpl, globalThis.atob);
+
+  return {
+    caches,
+    async fire(type: string, event: any) {
+      const waits: Promise<any>[] = [];
+      event.waitUntil = (p: Promise<any>) => void waits.push(p);
+      for (const l of listeners[type] || []) l(event);
+      await Promise.all(waits);
+    },
+    async message(data: any) {
+      await this.fire("message", { data });
+    },
+    async fetchEvent(url: string) {
+      let respondWithPromise: Promise<Response> | undefined;
+      const event = { request: new Request(url), respondWith: (p: Promise<Response>) => void (respondWithPromise = p) };
+      await this.fire("fetch", event);
+      return respondWithPromise!;
+    },
+  };
+}
+
+const ok = (body: string, status = 200, type = "text/html") =>
+  new Response(body, { status, headers: { "Content-Type": type } });
+
+const htmlFetch = (body: string) => async () => ok(JSON.stringify(contentsJson(body)));
+
+describe("edgeqa-sw VFS cache strategy", () => {
+  it("always revalidates HTML documents — a cached copy is never served, even fresh", async () => {
+    const sw = makeSW(htmlFetch("<html><body>FRESH</body></html>"));
+    const cache = await sw.caches.open("edgeqa-vfs-v2");
+    await cache.put(new Request(DEMO_HTML_URL), ok("<html><body>CACHED</body></html>"));
+    const res = await sw.fetchEvent(DEMO_HTML_URL);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("FRESH");
+  });
+
+  it("serves static assets from cache within the TTL (no GitHub call)", async () => {
+    const fetchMock = vi.fn<FetchMock>(async () => ok(JSON.stringify(contentsJson("FRESH_JS")), 200, "application/javascript"));
+    const sw = makeSW(fetchMock);
+    const cache = await sw.caches.open("edgeqa-vfs-v2");
+    await cache.put(new Request(ASSET_URL), new Response("CACHED_JS", { headers: { "Content-Type": "application/javascript", "x-edgeqa-cached-at": String(Date.now()) } }));
+    const res = await sw.fetchEvent(ASSET_URL);
+    expect(await res.text()).toBe("CACHED_JS");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refetches static assets after the TTL expires", async () => {
+    const fetchMock = vi.fn<FetchMock>(async () => ok(JSON.stringify(contentsJson("FRESH_JS")), 200, "application/javascript"));
+    const sw = makeSW(fetchMock);
+    const cache = await sw.caches.open("edgeqa-vfs-v2");
+    await cache.put(new Request(ASSET_URL), new Response("CACHED_JS", { headers: { "Content-Type": "application/javascript", "x-edgeqa-cached-at": String(Date.now() - 10 * 60 * 1000) } }));
+    const res = await sw.fetchEvent(ASSET_URL);
+    expect(await res.text()).toBe("FRESH_JS");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the cached copy when GitHub rate-limits (429)", async () => {
+    const sw = makeSW(async () => ok("{}", 429, "application/json"));
+    const cache = await sw.caches.open("edgeqa-vfs-v2");
+    await cache.put(new Request(DEMO_HTML_URL), ok("<html><body>CACHED</body></html>"));
+    const res = await sw.fetchEvent(DEMO_HTML_URL);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("CACHED");
+  });
+
+  it("falls back to the cached copy when the network fetch throws", async () => {
+    const sw = makeSW(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    const cache = await sw.caches.open("edgeqa-vfs-v2");
+    await cache.put(new Request(DEMO_HTML_URL), ok("<html><body>CACHED</body></html>"));
+    const res = await sw.fetchEvent(DEMO_HTML_URL);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("CACHED");
+  });
+
+  it("returns 404 (not a crash) when a refetch fails and nothing is cached", async () => {
+    const sw = makeSW(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    const res = await sw.fetchEvent(DEMO_HTML_URL);
+    expect(res.status).toBe(404);
+  });
+
+  it("locks non-demo scopes without a token (401)", async () => {
+    const sw = makeSW(async () => ok(JSON.stringify(contentsJson("<html>nope</html>"))));
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/index.html");
+    expect(res.status).toBe(401);
+  });
+
+  it("serves the demo scope without a token", async () => {
+    const sw = makeSW(htmlFetch("<html><body>DEMO</body></html>"));
+    const res = await sw.fetchEvent(DEMO_HTML_URL);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("DEMO");
+  });
+
+  it("attaches the unlocked token as a Bearer header", async () => {
+    const fetchMock = vi.fn<FetchMock>(async () => ok(JSON.stringify(contentsJson("<html><body>PRIVATE</body></html>"))));
+    const sw = makeSW(fetchMock);
+    await sw.message({ type: "SET_TOKEN", scope: "acme/site/main", token: "ghp_secret" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/index.html");
+    expect(res.status).toBe(200);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init?.headers?.["Authorization"]).toBe("Bearer ghp_secret");
+  });
+
+  it("falls back to index.html for unknown SPA routes", async () => {
+    const fetchMock = vi.fn<FetchMock>(async (url: string) =>
+      url.includes("/contents/some/route")
+        ? ok("{}", 404, "application/json")
+        : ok(JSON.stringify(contentsJson("<html><body>SPA_ROOT</body></html>"))),
+    );
+    const sw = makeSW(fetchMock);
+    const res = await sw.fetchEvent(ROUTE_URL);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("SPA_ROOT");
+    expect(fetchMock.mock.calls.some(([u]) => u.includes("index.html"))).toBe(true);
+  });
+
+  it("removes stale cache versions on activate", async () => {
+    const sw = makeSW(htmlFetch("<html></html>"));
+    const old = await sw.caches.open("edgeqa-vfs-v1");
+    await old.put(new Request(DEMO_HTML_URL), ok("<html>old</html>"));
+    const current = await sw.caches.open("edgeqa-vfs-v2");
+    await current.put(new Request(ASSET_URL), ok("asset", 200, "application/javascript"));
+    await sw.fire("activate", {});
+    expect(await sw.caches.keys()).toEqual(["edgeqa-vfs-v2"]);
+  });
+});

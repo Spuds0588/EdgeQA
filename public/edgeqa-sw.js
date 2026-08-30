@@ -64,19 +64,32 @@ async function githubFile(info, token) {
   }
   return body ? new Response(body, { headers: { "Content-Type": contentType(info.path), "Cache-Control": "no-store" } }) : null;
 }
+// Never let a network failure (offline, DNS, GitHub blip) throw out of the fetch handler —
+// return null so the caller can fall back to a cached copy instead of breaking the preview.
+async function githubFileSafe(info, token) {
+  try { return await githubFile(info, token); }
+  catch (error) { log("github fetch error", info.path, String(error)); return null; }
+}
 self.addEventListener("fetch", (event) => {
   const info = parseVirtual(event.request.url); if (!info) return;
   log("intercept", info.owner + "/" + info.repo + "/" + info.branch + "/" + info.path);
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
     const cached = await cache.match(event.request);
-    if (cached && Date.now() - Number(cached.headers.get("x-edgeqa-cached-at") || 0) < CACHE_TTL_MS) { log("cache hit", info.path); return cached; }
-    if (cached) log("cache stale — refetching", info.path);
+    // HTML documents are always revalidated so a dev's push lands on the tester's next
+    // reload; static assets are served from cache for up to CACHE_TTL_MS, then refetched.
+    const isHtml = contentType(info.path) === "text/html";
+    if (cached && !isHtml && Date.now() - Number(cached.headers.get("x-edgeqa-cached-at") || 0) < CACHE_TTL_MS) { log("cache hit", info.path); return cached; }
+    if (cached) log(isHtml ? "html — refetching" : "cache stale — refetching", info.path);
     const token = tokenByScope.get(scopeOf(info));
     if (!token && scopeOf(info) !== DEMO_SCOPE) { log("locked, no token for", scopeOf(info)); return new Response("EdgeQA session is locked", { status: 401 }); }
-    let response = await githubFile(info, token);
-    if (!response && info.path !== "index.html") { log("spa fallback", info.path); response = await githubFile({ ...info, path: "index.html" }, token); }
-    if (!response) { log("404", info.path); return new Response("File not found", { status: 404 }); }
+    let response = await githubFileSafe(info, token);
+    if (!response && info.path !== "index.html") { log("spa fallback", info.path); response = await githubFileSafe({ ...info, path: "index.html" }, token); }
+    if (!response) {
+      // Refetch failed (rate limit, transient error): serve any cached copy rather than break the preview.
+      if (cached) { log("refetch failed — serving cached copy", info.path); return cached; }
+      log("404", info.path); return new Response("File not found", { status: 404 });
+    }
     if (response.status === 200) {
       const headers = new Headers(response.headers);
       headers.set("x-edgeqa-cached-at", String(Date.now()));
