@@ -1,4 +1,5 @@
-const CACHE_NAME = "edgeqa-vfs-v1";
+const CACHE_NAME = "edgeqa-vfs-v2"; // bump to invalidate cached content (e.g. when the demo example changes)
+const CACHE_TTL_MS = 5 * 60 * 1000; // serve cached files for up to 5 minutes, then refetch from GitHub
 const tokenByScope = new Map();
 // The public example repo the "Try the live demo" flow points at. It is served
 // without a token so visitors can preview the platform before bringing their own
@@ -11,7 +12,15 @@ log("service worker starting, scope", scopePath);
 const mime = { html: "text/html", css: "text/css", js: "application/javascript", mjs: "application/javascript", json: "application/json", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", txt: "text/plain", map: "application/json" };
 
 self.addEventListener("install", () => { log("install: skipping wait"); self.skipWaiting(); });
-self.addEventListener("activate", (event) => { log("activate: claiming clients"); event.waitUntil(self.clients.claim()); });
+self.addEventListener("activate", (event) => {
+  log("activate: claiming clients");
+  event.waitUntil((async () => {
+    await self.clients.claim();
+    const old = await caches.keys();
+    await Promise.all(old.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name)));
+    if (old.length > 1) log("removed stale caches:", old.join(", "));
+  })());
+});
 self.addEventListener("message", (event) => {
   const { type, scope } = event.data || {};
   log("message", type, scope || "");
@@ -59,13 +68,21 @@ self.addEventListener("fetch", (event) => {
   const info = parseVirtual(event.request.url); if (!info) return;
   log("intercept", info.owner + "/" + info.repo + "/" + info.branch + "/" + info.path);
   event.respondWith((async () => {
-    const cache = await caches.open(CACHE_NAME); const cached = await cache.match(event.request); if (cached) { log("cache hit", info.path); return cached; }
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(event.request);
+    if (cached && Date.now() - Number(cached.headers.get("x-edgeqa-cached-at") || 0) < CACHE_TTL_MS) { log("cache hit", info.path); return cached; }
+    if (cached) log("cache stale — refetching", info.path);
     const token = tokenByScope.get(scopeOf(info));
     if (!token && scopeOf(info) !== DEMO_SCOPE) { log("locked, no token for", scopeOf(info)); return new Response("EdgeQA session is locked", { status: 401 }); }
     let response = await githubFile(info, token);
     if (!response && info.path !== "index.html") { log("spa fallback", info.path); response = await githubFile({ ...info, path: "index.html" }, token); }
     if (!response) { log("404", info.path); return new Response("File not found", { status: 404 }); }
-    if (response.status === 200) { await cache.put(event.request, response.clone()); log("cached", info.path); }
+    if (response.status === 200) {
+      const headers = new Headers(response.headers);
+      headers.set("x-edgeqa-cached-at", String(Date.now()));
+      await cache.put(event.request, new Response(response.clone().body, { status: response.status, statusText: response.statusText, headers }));
+      log("cached", info.path);
+    }
     return response;
   })());
 });
