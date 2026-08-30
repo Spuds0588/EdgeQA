@@ -128,12 +128,10 @@ tests/edgeqa.spec.ts     Playwright e2e specs
 
 ## Current status & roadmap
 
-Working today: link generation/decryption, the VFS service worker, repo-URL parsing, bookmarklet, the full landing experience, and the in-context report UI (desktop + mobile).
+Working today: link generation/decryption, the VFS service worker (with the real decrypted token handed off securely), repo-URL parsing, bookmarklet, the full landing experience, the in-context report drawer (desktop + mobile), and **real GitHub issue creation** — reports are `POST`ed to the repo's Issues API with an `edgeqa-report` label and session context (path, viewport, UA) attached, with a link to the filed issue on success.
 
 Next up:
 
-- Wire the report form to **create real GitHub issues** via the decrypted PAT (`POST /repos/{owner}/{repo}/issues` with an `edgeqa-report` label).
-- Send the real decrypted token (not the placeholder) in the Service Worker `SET_TOKEN` handoff.
 - Experimental in-browser JSX/React transpilation mode (`&preset=react`).
 
 ## Limitations

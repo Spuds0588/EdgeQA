@@ -1,4 +1,4 @@
-import { createElement, useEffect, useMemo, useState } from "react";
+import { createElement, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ArrowRight, Check, ChevronDown, Clipboard, GitBranch, KeyRound, Link2, LockKeyhole, Menu, ShieldCheck, X, Zap } from "lucide-react";
 import "./index.css";
@@ -70,7 +70,7 @@ function App() {
     const payload = await makePayload(token, pin);
     const value = `${window.location.origin}/#repo=${encodeURIComponent(`${owner}/${repo}`)}&branch=${encodeURIComponent(branch)}&payload=${encodeURIComponent(payload)}`;
     setLink(value);
-    setToken(""); // don't keep the developer's token after the link is minted
+    // keep the token in memory for this tab so "Open preview" and issue filing work; it still never touches a server or localStorage
   };
 
   const applyRepoUrl = (value: string) => {
@@ -93,7 +93,7 @@ function App() {
     } catch { setError("That PIN did not unlock this QA session."); }
   };
 
-  if (mode === "viewer") return <Viewer repo={repoLabel} branch={branch} onExit={() => setMode("home")} />;
+  if (mode === "viewer") return <Viewer repo={repoLabel} branch={branch} token={token} onExit={() => setMode("home")} />;
 
   return (
     <div className="app-shell">
@@ -134,11 +134,16 @@ function Setup(props: any) {
   return <main className="setup container"><button className="back" onClick={props.onBack}>← Back to home</button><div className="setup-grid"><div className="setup-intro"><div className="eyebrow"><span className="pulse" /> NEW QA SESSION</div><h1>Bring your repo.<br /><em>Leave the deploy.</em></h1><p>Paste a GitHub repository URL, pick your branch, and mint a PIN-protected QA link — all in your browser.</p><div className="setup-note"><ShieldCheck size={18} /><span><b>Your token is ephemeral</b><small>Held in browser memory (per-tab) and not sent to any server.</small></span></div><div className="bookmark-box"><Zap size={15} /><div><b>Open any repo in one click</b><small>Drag this into your bookmarks bar, then press it while viewing a GitHub repo to pre-fill this form.</small></div><a className="bookmarklet" href={bookmarklet}>⚡ Install bookmarklet</a></div></div><div className="form-card"><div className="form-title"><span className="step-badge">01</span><span><b>Connect repository</b><small>Fine-grained token required</small></span></div><label>Repository URL<div className="input-icon"><Link2 size={15} /><input value={props.repoUrl} onChange={(e: any) => props.applyRepoUrl(e.target.value)} placeholder="https://github.com/acme/site or acme/site" /></div><small className="hint">Paste a full GitHub URL (owner & repo are pulled out), or fill the fields below. Supports <code>/tree/BRANCH</code>.</small></label><div className="two-col"><label>Repository owner<input value={props.owner} onChange={(e: any) => props.setOwner(e.target.value)} placeholder="e.g. acme-studio" /></label><label>Repository name<input value={props.repo} onChange={(e: any) => props.setRepo(e.target.value)} placeholder="e.g. marketing-site" /></label></div><label>Branch<input value={props.branch} onChange={(e: any) => props.setBranch(e.target.value)} /></label><div className="target-chip"><Link2 size={13} /> <span>{target}</span></div><div className="pat-box"><div className="pat-head" onClick={() => setPatOpen(!patOpen)}><KeyRound size={15} /><span><b>Need a fine-grained token?</b><small>Steps to create one</small></span><ChevronDown size={15} className={patOpen ? "spin" : ""} /></div>{patOpen && <ol className="pat-steps"><li>Go to <a href="https://github.com/settings/personal-access-tokens/new?scopes=" target="_blank" rel="noreferrer">github.com/settings/tokens</a> → <b>Generate new token</b>.</li><li>Choose <b>Fine-grained tokens</b>.</li><li>Under <b>Repository access</b>, pick the repo(s) you want to preview.</li><li>Under <b>Permissions</b> set <b>Contents → Read-only</b> and <b>Issues → Read and write</b>.</li><li>Generate, then paste the <code>github_pat_…</code> token into the field below.</li><li>Reuse it across sessions in this tab, or remove it after the link is minted — it stays in your browser.</li></ol>}</div><label>GitHub fine-grained token<div className="input-icon"><KeyRound size={15} /><input type="password" value={props.token} onChange={(e: any) => props.setToken(e.target.value)} placeholder="github_pat_••••••••••" /></div><small className="hint">Needs <b>Contents: Read</b> to serve files and <b>Issues: Write</b> to accept bug reports.</small></label><div className="form-title second"><span className="step-badge">02</span><span><b>Protect your link</b><small>Share the PIN separately</small></span></div><label>Session PIN<div className="input-icon"><LockKeyhole size={15} /><input type="password" value={props.pin} onChange={(e: any) => props.setPin(e.target.value)} placeholder="At least 6 characters" /></div></label>{props.error && <div className="error">{props.error}</div>}<button className="primary full" onClick={props.generate}>Generate magic link <ArrowRight size={17} /></button>{props.link && <div className="link-result"><small>YOUR SECURE QA LINK</small><div><span>{props.link.slice(0, 42)}…</span><button onClick={props.copyLink}>{props.copied ? <Check size={16} /> : <Clipboard size={16} />}</button></div><button className="launch" onClick={props.onLaunch}>Open preview <ArrowRight size={14} /></button></div>}</div></div></main>;
 }
 
-function Viewer({ repo, branch, onExit }: { repo: string; branch: string; onExit: () => void }) {
+function Viewer({ repo, branch, token, onExit }: { repo: string; branch: string; token: string; onExit: () => void }) {
   const [warning, setWarning] = useState("");
   const [reportOpen, setReportOpen] = useState(false);
-  const [reportSent, setReportSent] = useState(false);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [issueUrl, setIssueUrl] = useState("");
+  const [reportError, setReportError] = useState("");
   const [owner, repoName] = repo.split("/");
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const base = import.meta.env.BASE_URL || "/";
   const baseRoot = base.endsWith("/") ? base : base + "/";
   const sandboxUrl = `${baseRoot}sandbox/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/${encodeURIComponent(branch)}/index.html`;
@@ -146,14 +151,50 @@ function Viewer({ repo, branch, onExit }: { repo: string; branch: string; onExit
     if (!("serviceWorker" in navigator)) return;
     console.log("[edgeqa] registering service worker at", `${baseRoot}edgeqa-sw.js`);
     navigator.serviceWorker.register(`${baseRoot}edgeqa-sw.js`).then(() => navigator.serviceWorker.ready).then((registration) => {
-      registration.active?.postMessage({ type: "SET_TOKEN", scope: `${repo}/${branch}`, token: "session-token" });
+      if (token) registration.active?.postMessage({ type: "SET_TOKEN", scope: `${repo}/${branch}`, token });
     });
     const handler = (event: MessageEvent) => {
       if (event.data?.type === "EDGEQA_WARNING") { console.warn("[edgeqa]", event.data.message); setWarning(event.data.message); }
     };
     navigator.serviceWorker.addEventListener("message", handler); return () => navigator.serviceWorker.removeEventListener("message", handler);
-  }, [repo, branch, baseRoot]);
-  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}>🐞 Report a bug</button></div></div><div className="viewer-body"><iframe title="EdgeQA repository sandbox" src={sandboxUrl} /><div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Sandbox ready</h2><p>Connect a repository to load <b>{repo}</b> on the <b>{branch}</b> branch.</p><button className="primary" onClick={onExit}>Configure repository <ArrowRight size={16} /></button><small>Service Worker VFS · Token held in memory</small></div></div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}>🐞<span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div><label>Short title<input placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea placeholder="Describe the bug and what you expected instead…" rows={6} /></label><button className="primary full" onClick={() => { setReportSent(true); setReportOpen(false); }}>Create GitHub issue <ArrowRight size={16} /></button>{reportSent && <small className="success">Issue queued with session context.</small>}<p className="report-context">Filed against <b>{repo}</b> · current path, viewport, and UA attached automatically.</p></aside></div>;
+  }, [repo, branch, baseRoot, token]);
+  const submitIssue = async () => {
+    if (!title.trim() || submitting) return;
+    setSubmitting(true); setReportError(""); setIssueUrl("");
+    const path = iframeRef.current?.contentWindow?.location.pathname || sandboxUrl;
+    const context = [
+      "**Reported via EdgeQA**",
+      `- Repository: \`${repo}\``,
+      `- Branch: \`${branch}\``,
+      `- Path: \`${path}\``,
+      `- Viewport: ${window.innerWidth}×${window.innerHeight}`,
+      `- UA: ${navigator.userAgent}`,
+      "",
+      body.trim(),
+    ].join("\n");
+    try {
+      const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner || "owner")}/${encodeURIComponent(repoName || "repo")}/issues`, {
+        method: "POST",
+        headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ title: title.trim(), body: context, labels: ["edgeqa-report"] }),
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        if (response.status === 401) setReportError("Your token is invalid or was revoked. Generate a new fine-grained token.");
+        else if (response.status === 403 || response.status === 404) setReportError("Your token needs Issues: Read and write permission for this repository.");
+        else setReportError(`GitHub could not file the issue (${detail?.message || response.status}).`);
+        return;
+      }
+      const issue = await response.json();
+      setIssueUrl(issue.html_url || "https://github.com");
+      setTitle(""); setBody("");
+    } catch {
+      setReportError("Network error — check your connection and try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return <div className="viewer"><div className="viewer-top"><button className="brand" onClick={onExit}><span className="brand-mark"><Logo /></span><span>edge<span className="accent">qa</span></span></button><div className="viewer-address"><LockKeyhole size={12} /> edgeqa.local /sandbox/{repo}</div><div className="viewer-actions"><span className="live"><span className="live-dot" /> LIVE</span><button className="report" onClick={() => setReportOpen(!reportOpen)}>🐞 Report a bug</button></div></div><div className="viewer-body"><iframe ref={iframeRef} id="sandbox" title="EdgeQA repository sandbox" src={sandboxUrl} /><div className="empty-state overlay"><div className="empty-icon"><GitBranch size={26} /></div><h2>Sandbox ready</h2><p>Connect a repository to load <b>{repo}</b> on the <b>{branch}</b> branch.</p><button className="primary" onClick={onExit}>Configure repository <ArrowRight size={16} /></button><small>Service Worker VFS · Token held in memory</small></div></div>{warning && <div className="toast">{warning}<button onClick={() => setWarning("")}>×</button></div>}<button className="report-tab" onClick={() => setReportOpen(!reportOpen)}>🐞<span>Report a bug</span></button><aside className={`report-drawer${reportOpen ? " open" : ""}`}><div className="report-drawer-head"><div><div className="eyebrow"><span className="pulse" /> IN-CONTEXT REPORT</div><h2>Found something <em>off?</em></h2></div><button className="close" onClick={() => setReportOpen(false)}>×</button></div>{issueUrl ? <div className="report-done"><div className="empty-icon"><Check size={22} /></div><h3>Issue filed ✓</h3><p>Filed against <b>{repo}</b> with session context attached.</p><a className="issue-link" href={issueUrl} target="_blank" rel="noreferrer">View on GitHub <ArrowRight size={13} /></a><button className="ghost" onClick={() => setIssueUrl("")}>File another</button></div> : <><label>Short title<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Broken nav on mobile" /></label><label>What happened?<textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe the bug and what you expected instead…" rows={6} /></label>{reportError && <div className="error">{reportError}</div>}<button className="primary full" disabled={submitting || !title.trim()} onClick={submitIssue}>{submitting ? "Filing issue…" : "Create GitHub issue"}{!submitting && <ArrowRight size={16} />}</button><p className="report-context">Filed against <b>{repo}</b> · current path, viewport, and UA attached automatically.</p></>}</aside></div>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
