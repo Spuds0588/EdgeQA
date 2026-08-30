@@ -48,7 +48,21 @@ function contentType(path) { return mime[path.split(".").pop()?.toLowerCase()] |
 function decodeBase64(value) { const binary = atob(value.replace(/\n/g, "")); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i); return bytes; }
 function scopeOf(info) { return `${info.owner}/${info.repo}/${info.branch}`; }
 async function githubFile(info, token) {
-  const headers = token ? { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` } : { Accept: "application/vnd.github+json" };
+  // Public repos (no token): serve straight from raw.githubusercontent.com. Its rate
+  // limits dwarf the anonymous API's 60/hr, it needs no JSON/base64 round-trip, and
+  // it's CORS-open — so tokenless previews barely touch the API budget at all.
+  if (!token) {
+    const rawUrl = `https://raw.githubusercontent.com/${info.owner}/${info.repo}/${info.branch}/${info.path.split("/").map(encodeURIComponent).join("/")}`;
+    log("fetch raw", info.path, ">", rawUrl);
+    const rawResponse = await fetch(rawUrl);
+    if (!rawResponse.ok) {
+      if (rawResponse.status === 429 || (rawResponse.status === 403 && Number(rawResponse.headers.get("x-ratelimit-remaining")) === 0)) { log("rate-limited", info.path, rawResponse.status); return rateLimitPage(); }
+      log("raw miss", info.path, rawResponse.status); return null;
+    }
+    const rawBody = await rawResponse.arrayBuffer();
+    return new Response(rawBody, { headers: { "Content-Type": contentType(info.path), "Cache-Control": "no-store" } });
+  }
+  const headers = { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` };
   const endpoint = `https://api.github.com/repos/${encodeURIComponent(info.owner)}/${encodeURIComponent(info.repo)}/contents/${info.path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(info.branch)}`;
   log("fetch contents", info.path, ">", endpoint);
   const response = await fetch(endpoint, { headers });

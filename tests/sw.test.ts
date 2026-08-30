@@ -66,7 +66,14 @@ function makeSW(fetchImpl: FetchMock) {
 const ok = (body: string, status = 200, type = "text/html") =>
   new Response(body, { status, headers: { "Content-Type": type } });
 
-const htmlFetch = (body: string) => async () => ok(JSON.stringify(contentsJson(body)));
+// The SW serves tokenless previews from raw.githubusercontent.com (raw bytes) and
+// token-backed previews from api.github.com (contents JSON). This mock answers both.
+const htmlFetch = (body: string) =>
+  vi.fn<FetchMock>(async (url: string) =>
+    url.startsWith("https://raw.githubusercontent.com/")
+      ? ok(body)
+      : ok(JSON.stringify(contentsJson(body))),
+  );
 
 describe("edgeqa-sw VFS cache strategy", () => {
   it("always revalidates HTML documents — a cached copy is never served, even fresh", async () => {
@@ -89,7 +96,7 @@ describe("edgeqa-sw VFS cache strategy", () => {
   });
 
   it("refetches static assets after the TTL expires", async () => {
-    const fetchMock = vi.fn<FetchMock>(async () => ok(JSON.stringify(contentsJson("FRESH_JS")), 200, "application/javascript"));
+    const fetchMock = htmlFetch("FRESH_JS");
     const sw = makeSW(fetchMock);
     const cache = await sw.caches.open("edgeqa-vfs-v2");
     await cache.put(new Request(ASSET_URL), new Response("CACHED_JS", { headers: { "Content-Type": "application/javascript", "x-edgeqa-cached-at": String(Date.now() - 10 * 60 * 1000) } }));
@@ -168,16 +175,17 @@ describe("edgeqa-sw VFS cache strategy", () => {
   });
 
   it("falls back to index.html for unknown SPA routes", async () => {
-    const fetchMock = vi.fn<FetchMock>(async (url: string) =>
-      url.includes("/contents/some/route")
-        ? ok("{}", 404, "application/json")
-        : ok(JSON.stringify(contentsJson("<html><body>SPA_ROOT</body></html>"))),
-    );
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        return url.includes("/some/route") ? ok("not found", 404, "text/plain") : ok("<html><body>SPA_ROOT</body></html>");
+      }
+      return ok("{}", 404, "application/json");
+    });
     const sw = makeSW(fetchMock);
     const res = await sw.fetchEvent(ROUTE_URL);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("SPA_ROOT");
-    expect(fetchMock.mock.calls.some(([u]) => u.includes("index.html"))).toBe(true);
+    expect(fetchMock.mock.calls.some(([u]) => u.includes("raw.githubusercontent.com") && u.includes("index.html"))).toBe(true);
   });
 
   it("removes stale cache versions on activate", async () => {

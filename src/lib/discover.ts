@@ -26,13 +26,14 @@ export interface Probe {
 const identityCache = new Map<string, { account: string; repos: { full_name: string; private: boolean; default_branch: string }[] }>();
 const branchCache = new Map<string, string[]>();
 
-async function gh(path: string, token: string): Promise<{ status: number; json: any }> {
+async function gh(path: string, token: string): Promise<{ status: number; json: any; rateLimited: boolean }> {
   const headers: Record<string, string> = { Accept: "application/vnd.github+json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(GH + path, { headers });
   let json: any = null;
   try { json = await res.json(); } catch { /* 204/rate-limit/etc. */ }
-  return { status: res.status, json };
+  const rateLimited = res.status === 429 || (res.status === 403 && Number(res.headers.get("x-ratelimit-remaining")) === 0);
+  return { status: res.status, json, rateLimited };
 }
 
 // Generic/static resolver: index.html at the shallowest depth wins, plus top-level
@@ -76,6 +77,8 @@ export async function probeRepo(owner: string, repo: string, branch: string, tok
   if (meta.status === 200 && meta.json) {
     defaultBranch = meta.json.default_branch || branch;
     isPublic = token ? meta.json.private === false : true; // an anonymous 200 only happens for a public repo
+  } else if (meta.rateLimited) {
+    isPublic = undefined; // anonymous budget exhausted — we genuinely don't know; don't mislabel as private
   } else {
     isPublic = false; // 404/not found — not readable without a token (or owner/repo wrong)
   }

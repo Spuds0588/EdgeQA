@@ -121,7 +121,13 @@ function App() {
   const generate = async () => {
     setError(""); setRepoWarn("");
     if (!owner || !repo || pin.length < 6) { setError("Add a repository and a PIN of at least 6 characters."); return; }
-    const probe = await probeRepo(owner, repo, branch, token);
+    // The probe is a convenience check (block tokenless-private, auto-detect branch/site
+    // root) — if GitHub is unreachable or rate-limited it must never block minting.
+    // The service worker is the real enforcement point and shows the locked/rate-limit
+    // page if the repo turns out private or the preview can't be served.
+    let probe: Awaited<ReturnType<typeof probeRepo>>;
+    try { probe = await probeRepo(owner, repo, branch, token); }
+    catch { probe = { branch, defaultBranch: branch, siteRoot: "", public: undefined, sources: [] }; }
     if (!token && probe.public === false) { setError("This repo can't be previewed without a token — it's private or doesn't exist. Public repos work with no token; double-check the owner/repo name too."); return; }
     const resolvedBranch = probe.branch;
     if (resolvedBranch !== branch) setBranch(resolvedBranch);
@@ -129,9 +135,11 @@ function App() {
     setSiteRoot(root); setDemoPath(root);
     const pathPart = root ? `&path=${encodeURIComponent(root)}` : "";
     if (!probe.sources.length) {
-      setRepoWarn(probe.defaultBranch && probe.defaultBranch !== resolvedBranch
-        ? `No web page found on \`${resolvedBranch}\`. This repo's default branch is \`${probe.defaultBranch}\` — EdgeQA previews web apps.`
-        : `No index.html found on \`${resolvedBranch}\` — this doesn't look like it has a web app to preview.`);
+      setRepoWarn(probe.public === undefined
+        ? `Couldn't verify this repo with GitHub (rate limit or network) — the link will still work if it's public. If it's private, add a token.`
+        : probe.defaultBranch && probe.defaultBranch !== resolvedBranch
+          ? `No web page found on \`${resolvedBranch}\`. This repo's default branch is \`${probe.defaultBranch}\` — EdgeQA previews web apps.`
+          : `No index.html found on \`${resolvedBranch}\` — this doesn't look like it has a web app to preview.`);
     } else if (root && !siteChosen && root.split("/").length >= 3) {
       setRepoWarn(`Auto-detected \`${root}/\` — it's nested deep in the repo. If that's not the app's web root, connect with a token and pick the right entry.`);
     }

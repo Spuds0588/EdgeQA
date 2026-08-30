@@ -63,6 +63,18 @@ describe("probeRepo (token-aware)", () => {
     expect(probe.sources[0].doc).toBe("DualBoy/src");
   });
 
+  it("rate-limited anonymous probe is 'unknown', not mislabeled as private", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ message: "API rate limit exceeded" }), { status: 403, headers: { "x-ratelimit-remaining": "0" } }),
+      ),
+    );
+    const probe = await probeRepo("Spuds0588", "QuickRecord", "main", "");
+    expect(probe.public).toBeUndefined(); // unknown — must NOT block tokenless generation with a false "private" label
+    expect(probe.siteRoot).toBe("");
+  });
+
   it("private repo without a token is detected as not public (blocks tokenless generation)", async () => {
     vi.stubGlobal(
       "fetch",
