@@ -1,9 +1,11 @@
 // Repo → entry-point discovery. This is the future-proofing seam: project types
 // (static, and later Vite/React/Angular/Tauri/build-based) slot in as resolvers
 // here without touching the picker, the `path` plumbing, the service worker, or
-// issue reporting. Today only the generic/static resolver exists; `kind` already
-// distinguishes "servable as-is" from "needs a build tier" for the future.
+// issue reporting. `kind` distinguishes "servable as-is" from "needs a build
+// tier", and `preset` names the in-browser transpile mode when one applies.
 const GH = "https://api.github.com";
+
+export type Preset = "react" | "preact" | "jsx";
 
 export interface Candidate {
   /** Value baked into &path= ("", "docs", "DualBoy/src", or "gui/root.html"). */
@@ -21,10 +23,13 @@ export interface Probe {
   /** undefined = unknown (e.g. token gave access); true/false = known. */
   public: boolean | undefined;
   sources: Candidate[];
+  /** Framework detected from repo signals ("react" | "preact" | "jsx"), if any. */
+  preset?: Preset;
 }
 
 const identityCache = new Map<string, { account: string; repos: { full_name: string; private: boolean; default_branch: string }[] }>();
 const branchCache = new Map<string, string[]>();
+const pkgCache = new Map<string, any>();
 
 async function gh(path: string, token: string): Promise<{ status: number; json: any; rateLimited: boolean }> {
   const headers: Record<string, string> = { Accept: "application/vnd.github+json" };
@@ -64,10 +69,58 @@ export function resolveEntryPoints(tree: { path: string; type: string }[]): Cand
   return out;
 }
 
+// Tree-level signals that a repo holds framework *source* (not a built site) —
+// the gate before spending a package.json fetch. .vue/.svelte/.tsx/.jsx files and
+// build configs are the tells; a pure static site has none of them.
+function looksLikeSource(tree: { path: string; type: string }[]): boolean {
+  const paths = (tree || []).map((n) => n.path || "");
+  return paths.some((p) => /\.(jsx|tsx|vue|svelte)$/i.test(p))
+    || paths.some((p) => /(^|\/)vite\.config\.[cm]?[jt]s$/i.test(p))
+    || paths.some((p) => /(^|\/)angular\.json$/i.test(p));
+}
+
+// Framework detection from repo signals. Only presets the build tier can actually
+// run are returned (react / preact / generic jsx+tsx) — vue/svelte/angular
+// detection lands with their transpile rounds.
+export function detectPreset(tree: { path: string; type: string }[], pkg: any): Preset | null {
+  const paths = new Set((tree || []).map((n) => n.path || ""));
+  const has = (re: RegExp) => [...paths].some((p) => re.test(p));
+  const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+  if (deps["preact"]) return "preact";
+  if (deps["react"] && deps["react-dom"]) return "react";
+  if (has(/^vite\.config\./) || has(/^src\/main\.(tsx|jsx)$/) || has(/\.(tsx|jsx)$/)) return "jsx";
+  return null;
+}
+
 async function treeFor(owner: string, repo: string, ref: string, token: string): Promise<{ path: string; type: string }[]> {
   const res = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(ref)}?recursive=1`, token);
   if (res.status !== 200 || !Array.isArray(res.json?.tree)) return [];
   return res.json.tree;
+}
+
+// package.json via raw.githubusercontent for tokenless (no API budget) or the
+// contents API with a token (private repos). Only fetched when the tree already
+// looks like framework source.
+async function fetchPackageJson(owner: string, repo: string, ref: string, token: string): Promise<any | null> {
+  const key = `${owner}/${repo}/${ref}`;
+  if (pkgCache.has(key)) return pkgCache.get(key);
+  let pkg: any = null;
+  try {
+    if (token) {
+      const res = await gh(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/package.json?ref=${encodeURIComponent(ref)}`, token);
+      if (res.status === 200 && res.json?.content) {
+        const bin = atob(res.json.content.replace(/\n/g, ""));
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        pkg = JSON.parse(new TextDecoder().decode(bytes));
+      }
+    } else {
+      const raw = await fetch(`https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${encodeURIComponent(ref)}/package.json`);
+      if (raw.ok) pkg = await raw.json();
+    }
+  } catch { pkg = null; }
+  pkgCache.set(key, pkg);
+  return pkg;
 }
 
 export async function probeRepo(owner: string, repo: string, branch: string, token: string): Promise<Probe> {
@@ -92,7 +145,12 @@ export async function probeRepo(owner: string, repo: string, branch: string, tok
     const fb = resolveEntryPoints(tree);
     if (fb.length) { sources = fb; siteRoot = fb[0].doc || ""; resolved = defaultBranch; }
   }
-  return { branch: resolved, defaultBranch, siteRoot, public: isPublic, sources };
+  let preset: Preset | undefined;
+  if (looksLikeSource(tree)) {
+    const pkg = await fetchPackageJson(owner, repo, resolved, token);
+    preset = detectPreset(tree, pkg) || undefined;
+  }
+  return { branch: resolved, defaultBranch, siteRoot, public: isPublic, sources, preset };
 }
 
 export async function loadIdentity(token: string): Promise<{ account: string; repos: { full_name: string; private: boolean; default_branch: string }[] }> {

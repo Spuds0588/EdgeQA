@@ -21,7 +21,17 @@ test("parses blob URL with branch and path", () => {
   expect(parseRepoInput("https://github.com/acme/site/blob/dev/src/index.html")).toEqual({
     owner: "acme",
     repo: "site",
+    branch: "dev",
+    path: "src/index.html",
+  });
+});
+
+test("parses tree URL with branch and subfolder", () => {
+  expect(parseRepoInput("https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react")).toEqual({
+    owner: "vitejs",
+    repo: "vite",
     branch: "main",
+    path: "packages/create-vite/template-react",
   });
 });
 

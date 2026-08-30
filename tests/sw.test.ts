@@ -14,7 +14,7 @@ const contentsJson = (body: string) => ({ type: "file", size: body.length, conte
 
 type FetchMock = (url: string, init?: { headers?: Record<string, string> }) => Promise<Response>;
 
-function makeSW(fetchImpl: FetchMock) {
+function makeSW(fetchImpl: FetchMock, extraSelf: Record<string, any> = {}) {
   const listeners: Record<string, ((event: any) => void)[]> = {};
   const store = new Map<string, Map<string, Response>>();
 
@@ -38,6 +38,7 @@ function makeSW(fetchImpl: FetchMock) {
     skipWaiting: vi.fn(),
     clients: { claim: vi.fn(async () => {}), matchAll: vi.fn(async () => []) },
     addEventListener: (type: string, fn: (e: any) => void) => void (listeners[type] ||= []).push(fn),
+    ...extraSelf,
   };
 
   const fn = new Function("self", "caches", "fetch", "atob", code);
@@ -222,6 +223,115 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("SPA_ROOT");
     expect(fetchMock.mock.calls.some(([u]) => u.includes("raw.githubusercontent.com") && u.endsWith("/main/index.html"))).toBe(true);
+  });
+
+  it("preset scope: injects an import map and rewrites absolute asset paths in HTML", async () => {
+    const sw = makeSW(htmlFetch('<html><head><title>App</title></head><body><script type="module" src="/src/main.tsx"></script></body></html>'));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/index.html");
+    const text = await res.text();
+    expect(text).toContain("type=\"importmap\"");
+    expect(text).toContain("esm.sh/react");
+    expect(text).toContain("src=\"src/main.tsx\""); // absolute /src → relative to doc dir (root)
+  });
+
+  it("preset scope: absolute paths rewrite relative to a subfolder document", async () => {
+    const sw = makeSW(htmlFetch('<html><body><script type="module" src="/index.jsx"></script></body></html>'));
+    await sw.message({ type: "SET_PRESET", scope: "preactjs/preact/main", preset: "jsx" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/preactjs/preact/main/demo/index.html");
+    expect(await res.text()).toContain("src=\"index.jsx\""); // doc-dir-relative (app root), not repo root
+  });
+
+  it("preset scope: JSX is transpiled and CSS imports become stylesheet injectors", async () => {
+    const fakeBabel = { transform: (code: string, opts: any) => ({ code: `/*${opts.filename}*/` + code }) };
+    const sw = makeSW(htmlFetch('import { useState } from "react";\nimport "./App.css";\nexport const App = () => <button>x</button>;'), { Babel: fakeBabel });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/App.jsx");
+    expect(res.status).toBe(200);
+    expect((await res.headers.get("Content-Type") || "")).toContain("javascript");
+    const text = await res.text();
+    expect(text).toContain("/*src/App.jsx*/"); // fake babel ran
+    expect(text).not.toContain('import "./App.css"'); // css import stripped
+    expect(text).toContain("App.css"); // injector references it
+    expect(text).toContain("stylesheet");
+  });
+
+  it("preset scope: single-quoted CSS and Vite asset imports are rewritten after transpile", async () => {
+    const fakeBabel = { transform: (code: string, opts: any) => ({ code: `/*${opts.filename}*/` + code }) };
+    const sw = makeSW(htmlFetch('import { useState } from \'react\';\nimport \'./index.css\';\nimport heroImg from \'./assets/hero.png\';\nexport const App = () => <img src={heroImg} />;'), { Babel: fakeBabel });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/App.jsx");
+    const text = await res.text();
+    expect(text).not.toContain("import './index.css'"); // single-quoted side-effect css import stripped
+    expect(text).toContain("index.css"); // injector references it
+    expect(text).not.toContain("import heroImg"); // asset import rewritten
+    expect(text).toContain("const heroImg = new URL('./assets/hero.png', import.meta.url).href");
+    expect(text).toContain("import { useState } from 'react'"); // bare imports untouched (import map resolves them)
+  });
+
+  it("preset scope: extensionless module import resolves to ./name.jsx (vite-style)", async () => {
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        if (url.endsWith("/demo/style.jsx") || url.endsWith("/demo/style/index.jsx")) return ok("export const x = <b/>;", 200, "text/plain");
+        return ok("not found", 404, "text/plain");
+      }
+      return ok("{}", 404, "application/json");
+    });
+    const sw = makeSW(fetchMock, { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "preactjs/preact/main", preset: "jsx" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/preactjs/preact/main/demo/style");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("SW-TRANSPILED"); // resolved ./style -> ./style.jsx then transpiled
+    expect(fetchMock.mock.calls.some(([u]) => u.includes("/demo/style.jsx"))).toBe(true);
+  });
+
+  it("preset scope: bare directory import resolves to ./dir/index.tsx (vite-style)", async () => {
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        if (url.includes("/people/index.tsx")) return ok("export const P = <i/>;", 200, "text/plain");
+        return ok("not found", 404, "text/plain");
+      }
+      return ok("{}", 404, "application/json");
+    });
+    const sw = makeSW(fetchMock, { Babel: { transform: (c: string, o: any) => ({ code: `/*${o.filename}*/` + c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "preactjs/preact/main", preset: "jsx" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/preactjs/preact/main/demo/people");
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("SW-TRANSPILED");
+    expect(text).toContain("/*demo/people/index.tsx*/"); // transpiled as tsx
+  });
+
+  it("preset scope: directory-index module's sibling relative imports are rewired to its real folder", async () => {
+    const body = `import { Router } from './simple-router';;\nexport const X = () => <b/>;`;
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        if (url.includes("/suspense-router/index.jsx")) return ok(body, 200, "text/plain");
+        return ok("not found", 404, "text/plain");
+      }
+      return ok("{}", 404, "application/json");
+    });
+    const sw = makeSW(fetchMock, { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "preactjs/preact/main", preset: "jsx" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/preactjs/preact/main/demo/suspense-router");
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("./suspense-router/./simple-router"); // leading ./ kept, sibling prefix inserted
+  });
+
+  it("preset scope: CSS files pass through untouched (real stylesheets)", async () => {
+    const fakeBabel = { transform: (code: string) => ({ code }) };
+    const sw = makeSW(async () => ok("body { color: red; }", 200, "text/css"), { Babel: fakeBabel });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/App.css");
+    expect(await res.text()).toBe("body { color: red; }");
+  });
+
+  it("no preset: JSX is served raw, no import map injected", async () => {
+    const fakeBabel = { transform: (code: string) => ({ code }) };
+    const sw = makeSW(htmlFetch("<html><body>hi</body></html>"), { Babel: fakeBabel });
+    const res = await sw.fetchEvent(DEMO_HTML_URL);
+    expect(await res.text()).not.toContain("importmap");
   });
 
   it("removes stale cache versions on activate", async () => {

@@ -16,7 +16,137 @@ const VFS_TAG = "[edgeqa-sw]";
 const log = (...args) => console.log(VFS_TAG, ...args);
 const scopePath = (self.registration && self.registration.scope ? new URL(self.registration.scope).pathname : "/").replace(/\/$/, "") || "/";
 log("service worker starting, scope", scopePath);
-const mime = { html: "text/html", css: "text/css", js: "application/javascript", mjs: "application/javascript", json: "application/json", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", txt: "text/plain", map: "application/json" };
+const mime = { html: "text/html", css: "text/css", scss: "text/css", sass: "text/css", less: "text/css", styl: "text/css", js: "application/javascript", mjs: "application/javascript", json: "application/json", svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon", woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", txt: "text/plain", map: "application/json" };
+
+// --- Experimental in-browser build tier (react / preact / generic jsx+tsx) ---
+// Source repos (vite/react/etc.) are transpiled on the fly: JSX/TSX through
+// @babel/standalone, bare imports resolved via an injected import map to esm.sh.
+// This is the "build" half of the kind:"build" resolver seam — no server, no
+// bundler, no token leaving the browser.
+const BABEL_URL = "https://unpkg.com/@babel/standalone@7.26.4/babel.min.js";
+const PRESET_IMPORT_MAP = {
+  react: "https://esm.sh/react@19.1.0",
+  "react-dom": "https://esm.sh/react-dom@19.1.0",
+  "react-dom/client": "https://esm.sh/react-dom@19.1.0/client",
+  "react/jsx-runtime": "https://esm.sh/react@19.1.0/jsx-runtime",
+  "react/jsx-dev-runtime": "https://esm.sh/react@19.1.0/jsx-dev-runtime",
+  preact: "https://esm.sh/preact@10.26.4",
+  "preact/hooks": "https://esm.sh/preact@10.26.4/hooks",
+  "preact/compat": "https://esm.sh/preact@10.26.4/compat",
+  "preact/jsx-runtime": "https://esm.sh/preact@10.26.4/jsx-runtime",
+  "preact-router": "https://esm.sh/preact-router@4.1.2",
+  "preact/devtools/src/devtools": "https://esm.sh/preact@10.26.4/devtools/src/devtools",
+  "preact/debug/src/debug": "https://esm.sh/preact@10.26.4/debug/src/debug",
+  "mobx": "https://esm.sh/mobx@6.13.5",
+  "mobx-react": "https://esm.sh/mobx-react@9.2.0",
+  "mobx-state-tree": "https://esm.sh/mobx-state-tree@5.4.2",
+  "react-redux": "https://esm.sh/react-redux@9.2.0",
+  "@reduxjs/toolkit": "https://esm.sh/@reduxjs/toolkit@2.5.0",
+  "zustand": "https://esm.sh/zustand@5.0.3",
+  "styled-components": "https://esm.sh/styled-components@6.1.14",
+  "htm": "https://esm.sh/htm@3.1.1",
+  "redux": "https://esm.sh/redux@5.0.1",
+  "react-router-dom": "https://esm.sh/react-router-dom@6.30.0",
+  "@material-ui/core/TextField": "https://esm.sh/@material-ui/core@4.12.4/TextField",
+  "d3-scale": "https://esm.sh/d3-scale@4.0.2",
+  "d3-selection": "https://esm.sh/d3-selection@3.0.0",
+};
+const presetByScope = new Map();
+
+// importScripts() is only legal in a service worker during install/evaluation, so
+// load @babel/standalone lazily on first transpile via fetch + indirect eval
+// (runs in the worker global scope, no CSP on this SW). Fails safe to raw bytes.
+async function postDebug(payload) {
+  try {
+    const clients = await self.clients.matchAll();
+    clients.forEach((client) => client.postMessage({ type: "EDGEQA_DEBUG", ...payload }));
+  } catch { /* best-effort */ }
+}
+
+async function ensureBabel() {
+  if (self.Babel) { postDebug({ babel: "already", has: !!self.Babel }); return true; }
+  try {
+    log("loading babel");
+    const res = await fetch(BABEL_URL);
+    if (!res.ok) {
+      log("babel fetch failed", res.status);
+      const clients = await self.clients.matchAll();
+      clients.forEach((client) => client.postMessage({ type: "EDGEQA_WARNING", message: "In-browser build unavailable (couldn't load the transpiler) — serving source files as-is." }));
+      return false;
+    }
+    (0, eval)(await res.text());
+    log("babel loaded", !!self.Babel);
+    postDebug({ babel: "loaded", has: !!self.Babel });
+    return !!self.Babel;
+  } catch (error) {
+    log("babel unavailable", String(error));
+    const clients = await self.clients.matchAll();
+    clients.forEach((client) => client.postMessage({ type: "EDGEQA_WARNING", message: "The in-browser build engine couldn't load — serving this repo's source files as-is." }));
+    return false;
+  }
+}
+
+// Transpile JSX/TSX and rewrite CSS imports into stylesheet-link injectors (vite
+// style `import "./App.css"`). Bare imports (react, preact/hooks) are left alone
+// — the injected import map resolves them.
+function transpileModule(code, path, extraDir) {
+  const isTs = /\.tsx?$/i.test(path);
+  const presets = isTs ? [["react", { runtime: "automatic" }], "typescript"] : [["react", { runtime: "automatic" }]];
+  // decorators + class fields (e.g. mobx @observer / @observable) ship in babel-standalone
+  // and are common in real React/TS source — enable both loosely.
+  const plugins = [["proposal-decorators", { legacy: true }], ["proposal-class-properties", { loose: true }]];
+  const out = self.Babel.transform(code, { presets, plugins, filename: path, sourceMaps: false, comments: false });
+  let js = out.code || "";
+  // A directory-index module (./x -> ./x/index.jsx) is served at the extensionless URL
+  // `/…/x`, so the browser resolves sibling imports (`./y`) against `/…` — one level up.
+  // Real Vite rewrites those specifiers to the resolved path; here we prefix every
+  // relative specifier with the directory offset (./y -> ./x/y, ../y -> ./y) so they
+  // resolve against the module's true folder.
+  if (extraDir) {
+    js = js.replace(/((?:from\s+|import\s*\(|import\s+|export\s+[^;]*?from\s+))(['"])((?:\.\.?\/)[^'"]*)/g, (m, ctx, q, rel) => `${ctx}${q}./${extraDir}/${rel}`);
+  }
+  const cssUrls = [];
+  js = js.replace(/(?:import\s+(?:[^'"]*?\s+from\s+)?)(['"])([^'"]+?\.(?:css|scss|sass|less|styl))\1/g, (m, q, url) => { cssUrls.push(url); return ""; });
+  // Vite-style asset imports (import img from './assets/x.png') become URL strings
+  // resolved against the module — the browser can't import binary files natively.
+  js = js.replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+(['"])([^'"]+?\.(?:png|jpe?g|gif|webp|svg|ico|avif|bmp|mp4|webm|mp3|wav|ogg|woff2?|ttf|eot))\2/g, (m, name, q, url) => `const ${name} = new URL(${q}${url}${q}, import.meta.url).href;`);
+  if (cssUrls.length) {
+    const injector = cssUrls.map((u) => `(()=>{const l=document.createElement("link");l.rel="stylesheet";l.href=new URL(${JSON.stringify(u)},import.meta.url).href;document.head.appendChild(l);})();`).join("");
+    js = injector + js;
+  }
+  return js;
+}
+
+// Inject the import map and rewrite app-root-absolute asset refs ("/src/main.tsx")
+// to be relative to this document's directory — vite dev HTML treats "/x" as
+// relative to the folder holding index.html, which is exactly what the sandbox
+// entry document represents.
+function transformHtml(html, path) {
+  const importMap = `<script type="importmap">${JSON.stringify({ imports: PRESET_IMPORT_MAP })}</script>`;
+  let out = html;
+  if (/<head[^>]*>/i.test(out)) out = out.replace(/(<head[^>]*>)/i, `$1${importMap}`);
+  else out = importMap + out;
+  out = out.replace(/((?:src|href|poster)=[""])\/(?!\/)([^""]*)/g, (m, pre, p) => `${pre}${p}`);
+  return out;
+}
+
+// Returns a transformed Response, or null when no transform applies (or babel is
+// unavailable) so the caller serves the original bytes.
+async function applyPreset(res, info, extraDir) {
+  try {
+    const p = info.path;
+    if (/\.html?$/i.test(p)) {
+      const text = await res.text();
+      return new Response(transformHtml(text, p) + "<!--SW-DONE-->", { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+    }
+    if (/\.(jsx|tsx|ts)$/i.test(p)) {
+      const text = await res.text();
+      if (!(await ensureBabel())) return new Response("/*SW-BABEL-FAIL*/" + text, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
+      return new Response("/*SW-TRANSPILED*/" + transpileModule(text, p, extraDir), { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
+    }
+  } catch (error) { log("preset transform failed", info.path, String(error)); }
+  return null;
+}
 
 self.addEventListener("install", () => { log("install: skipping wait"); self.skipWaiting(); });
 self.addEventListener("activate", (event) => {
@@ -33,6 +163,9 @@ self.addEventListener("message", (event) => {
   log("message", type, scope || "");
   if (type === "SET_TOKEN" && scope && event.data.token && !tokenByScope.has(scope)) {
     tokenByScope.set(scope, event.data.token); log("session unlocked for", scope);
+  }
+  if (type === "SET_PRESET" && scope && event.data.preset) {
+    presetByScope.set(scope, event.data.preset); log("preset", event.data.preset, "for", scope);
   }
   if (type === "CLEAR_CACHE") { log("clearing cache"); event.waitUntil(caches.delete(CACHE_NAME)); }
 });
@@ -94,9 +227,34 @@ async function githubFileSafe(info, token) {
   try { return await githubFile(info, token); }
   catch (error) { log("github fetch error", info.path, String(error)); return null; }
 }
+// Vite-style module resolution for source repos under an active preset: maps an
+// extensionless import (./pythagoras) to ./pythagoras.jsx and a bare directory
+// (./people) to ./people/index.tsx. Probes raw.githubusercontent (cheap, no API
+// budget) for each candidate; returns the first real file, or null. This only runs
+// after a genuine miss and is gated to non-document requests, so SPA routing is
+// unaffected — a navigation to /pythagoras still gets the SPA/index.html fallback.
+const SOURCE_EXTS = ["js", "mjs", "jsx", "ts", "tsx"];
+async function resolveModule(info, token) {
+  const slash = info.path.lastIndexOf("/");
+  const dir = slash >= 0 ? info.path.slice(0, slash) : "";
+  const name = info.path.slice(slash + 1);
+  const prefix = dir ? dir + "/" : "";
+  for (const ext of SOURCE_EXTS) {
+    const cand = `${prefix}${name}.${ext}`;
+    const r = await githubFileSafe({ ...info, path: cand }, token);
+    if (r && r.status === 200) return { ...info, path: cand };
+  }
+  for (const ext of SOURCE_EXTS) {
+    const cand = `${prefix}${name}/index.${ext}`;
+    const r = await githubFileSafe({ ...info, path: cand }, token);
+    if (r && r.status === 200) return { ...info, path: cand };
+  }
+  return null;
+}
 self.addEventListener("fetch", (event) => {
-  const info = parseVirtual(event.request.url); if (!info) return;
+  let info = parseVirtual(event.request.url); if (!info) return;
   log("intercept", info.owner + "/" + info.repo + "/" + info.branch + "/" + info.path);
+  postDebug({ intercept: info.path, preset: presetByScope.get(scopeOf(info)) || "" });
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
     const cached = await cache.match(event.request);
@@ -106,17 +264,41 @@ self.addEventListener("fetch", (event) => {
     if (cached && !isHtml && Date.now() - Number(cached.headers.get("x-edgeqa-cached-at") || 0) < CACHE_TTL_MS) { log("cache hit", info.path); return cached; }
     if (cached) log(isHtml ? "html — refetching" : "cache stale — refetching", info.path);
     const token = tokenByScope.get(scopeOf(info));
+    const preset = presetByScope.get(scopeOf(info));
     let response = await githubFileSafe(info, token);
     // Only document/navigation requests (routes and .html pages) get SPA fallback;
     // a missing asset (js/css/img/json…) is a plain 404, never an HTML page in its place.
     // Documents fall back to the nearest directory's index.html first, then repo root,
     // so subfolder sites (docs/, DualBoy/src/, public/views/) resolve their own root.
     const looksLikeAsset = /\.[a-z0-9]{2,6}$/i.test(info.path) && !/\.html?$/i.test(info.path);
+    // Build-tier module resolution: source repos import modules extensionless and by
+    // directory (./c -> ./c.jsx, ./people -> ./people/index.tsx). Only when a preset is
+    // active, after a genuine miss, and for non-document requests, so SPA routes still
+    // fall through to their index.html instead of being mis-resolved as modules.
+    let extraDir = "";
+    if (preset && !response && !looksLikeAsset && event.request.destination !== "document") {
+      const requestPath = info.path;
+      const resolved = await resolveModule(info, token);
+      if (resolved) {
+        const reqDir = requestPath.slice(0, requestPath.lastIndexOf("/"));
+        const resDir = resolved.path.slice(0, resolved.path.lastIndexOf("/"));
+        if (resDir !== reqDir) extraDir = resDir.slice(reqDir ? reqDir.length + 1 : 0);
+        info = resolved;
+        response = await githubFileSafe(resolved, token);
+        log("resolved module", info.path, "extraDir", extraDir || "-");
+      }
+    }
     if (!response && !looksLikeAsset && info.path !== "index.html") {
       log("spa fallback", info.path);
       const dir = info.path.slice(0, info.path.lastIndexOf("/"));
       if (dir) response = await githubFileSafe({ ...info, path: `${dir}/index.html` }, token);
       if (!response) response = await githubFileSafe({ ...info, path: "index.html" }, token);
+    }
+    // Experimental build tier: when this scope carries a preset, transpile JSX/TSX
+    // and inject the import map + absolute-path rewrite into HTML before caching.
+    if (preset && response && response.status === 200) {
+      const transformed = await applyPreset(response, info, extraDir);
+      if (transformed) { log("preset", preset, "applied to", info.path); response = transformed; }
     }
     if (response && response.status === 429) {
       if (cached) { log("rate-limited — serving cached copy", info.path); return cached; }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { resolveEntryPoints, probeRepo } from "../src/lib/discover";
+import { resolveEntryPoints, probeRepo, detectPreset } from "../src/lib/discover";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -39,6 +39,31 @@ describe("resolveEntryPoints (extensible generic resolver)", () => {
     ];
     const order = resolveEntryPoints(tree).map((c) => c.doc);
     expect(order).toEqual(["packages/site", "apps/web"]); // both depth-2; insertion order is stable
+  });
+});
+
+describe("detectPreset (framework detection)", () => {
+  it("package.json react deps → react", () => {
+    expect(detectPreset([], { dependencies: { react: "^19", "react-dom": "^19" } })).toBe("react");
+  });
+
+  it("package.json preact dep → preact", () => {
+    expect(detectPreset([], { dependencies: { preact: "^10" } })).toBe("preact");
+  });
+
+  it("vite config + src/main.tsx without package.json → generic jsx", () => {
+    const tree = [{ path: "vite.config.ts", type: "blob" }, { path: "src/main.tsx", type: "blob" }];
+    expect(detectPreset(tree, null)).toBe("jsx");
+  });
+
+  it("pure static tree → null (no framework)", () => {
+    const tree = [{ path: "index.html", type: "blob" }, { path: "styles.css", type: "blob" }];
+    expect(detectPreset(tree, null)).toBeNull();
+  });
+
+  it("vue/svelte-only trees are not detected yet (their transpile rounds haven't landed)", () => {
+    const tree = [{ path: "src/App.vue", type: "blob" }];
+    expect(detectPreset(tree, { dependencies: { vue: "^3" } })).toBeNull();
   });
 });
 
@@ -83,6 +108,41 @@ describe("probeRepo (token-aware)", () => {
     const probe = await probeRepo("acme", "private-repo", "main", "");
     expect(probe.public).toBe(false);
     expect(probe.siteRoot).toBe("");
+  });
+
+  it("tokenless probe detects react from tree signals + raw package.json", async () => {
+    const rawCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://raw.githubusercontent.com/")) {
+          rawCalls.push(url);
+          return new Response(JSON.stringify({ dependencies: { react: "^19", "react-dom": "^19" } }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        if (url.includes("/git/trees")) return json({ tree: [{ path: "index.html", type: "blob" }, { path: "vite.config.ts", type: "blob" }, { path: "src/main.tsx", type: "blob" }] });
+        return json({ default_branch: "main", private: false });
+      }),
+    );
+    const probe = await probeRepo("acme", "react-app", "main", "");
+    expect(probe.preset).toBe("react");
+    expect(rawCalls.some((u) => u.includes("package.json"))).toBe(true); // raw fetch, not the API budget
+  });
+
+  it("static repo never triggers a package.json fetch (no framework signals)", async () => {
+    const rawCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith("https://raw.githubusercontent.com/")) { rawCalls.push(url); return new Response("not found", { status: 404 }); }
+        if (url.includes("/git/trees")) return json({ tree: [{ path: "index.html", type: "blob" }, { path: "styles.css", type: "blob" }] });
+        return json({ default_branch: "main", private: false });
+      }),
+    );
+    const probe = await probeRepo("acme", "static-site", "main", "");
+    expect(probe.preset).toBeUndefined();
+    expect(rawCalls.length).toBe(0);
   });
 
   it("sends the token as a Bearer header so private repos resolve", async () => {
