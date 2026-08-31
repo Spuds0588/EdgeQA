@@ -106,6 +106,25 @@ const REPOS = [
   { id: "trucast", repo: "CrooksJeremy/TrueCast-Weather", branch: "main", path: "", preset: "svelte", local: "src", expect: /weather|Weather|forecast|TrueCast|humidity|wind/i, expectHtml: true },
   // mismo: author's fresh MISMO 3.4 XML library + browser demo (vanilla web component, tokenless).
   { id: "mismo", repo: "Spuds0588/MISMO.js", branch: "main", path: "", preset: "", expect: /MISMO|mismo|XML|xml|demo|generate/i, expectHtml: true },
+  // ---- Round 6: more real Vue admin apps across UI libraries ----
+  // geeker-admin: a real Vue3 + Vite + Element-Plus + Pinia admin (6.8k★). Single app in src,
+  // uses @ element-plus, vue-i18n, echarts, wangEditor. Stresses the Vue SFC tier on a
+  // mainstream element-plus admin.
+  { id: "geeker-admin", repo: "HalseySpicy/Geeker-Admin", branch: "master", path: "", preset: "vue", alias: "@:src", local: "src", expect: /登录|geeker|admin|管理|element/i, loadTimeout: 60_000 },
+  // vue3-antd-admin: a real Vue3 + Vue3 + Vite + Ant Design Vue admin (4.1k★). ant-design-vue
+  // is a heavy but published component library — a different UI library path than element/naive.
+  { id: "vue3-antd-admin", repo: "buqiyuan/vue3-antd-admin", branch: "main", path: "", preset: "vue", alias: "@:src", local: "src", expect: /登录|antd|admin|管理|Ant Design/i, loadTimeout: 60_000 },
+  // naive-ui-admin: a real Vue3 + Vite + Naive UI + TS admin (5.9k★). The jekip/naive-ui-admin
+  // repo already booted in Round 5 testing, so this is a second naive-ui admin with a distinct
+  // architecture (alova, vue-types, mockjs) to widen naive-ui coverage.
+  { id: "jekip-naive-admin", repo: "jekip/naive-ui-admin", branch: "main", path: "", preset: "vue", alias: "@:src", local: "src", expect: /登录|naive|admin|管理|NaiveUI/i, loadTimeout: 60_000 },
+  // soybean-admin: a heavyweight real Vue3 admin (14.9k★) tuned to Ant Design Vue + Tailwind +
+  // UnoCSS. Uses unpublished workspace `@sa/*` packages, so must degrade cleanly (like refine-crm).
+  { id: "soybean-admin", repo: "soybeanjs/soybean-admin", branch: "main", path: "", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true, loadTimeout: 60_000 },
+  // vben-admin: the reference Vue3 admin monorepo (33k★). Web entries live in apps/web-* and consume
+  // unpublished workspace `@vben/*` + `@sa/*` packages + internal UI packages, so it must degrade
+  // cleanly to the Document root (whole app is a workspace build).
+  { id: "vben-admin", repo: "vbenjs/vue-vben-admin", branch: "main", path: "apps/web-antd", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true, loadTimeout: 90_000 },
 ];
 
 const results = [];

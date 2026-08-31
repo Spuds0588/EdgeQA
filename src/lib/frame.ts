@@ -11,7 +11,10 @@ const ESM_CDN = "https://esm.sh/";
 // Resolve a site-root-relative target path from a module's directory — the same
 // "relative to the importing module" semantics Vite gives aliases/baseUrl imports.
 function relFrom(fromDir: string, toPath: string): string {
-  const from = fromDir ? fromDir.split("/") : [];
+  // Filter empty segments on BOTH sides: a module served at an extensionless directory URL
+  // (src/api) yields dir "src/api/" whose trailing empty segment would inflate `from.length`
+  // and emit a phantom extra "../". Mirrors the `to` side.
+  const from = fromDir ? fromDir.split("/").filter(Boolean) : [];
   const to = (toPath || "").split("/").filter(Boolean);
   let i = 0;
   while (i < from.length && i < to.length && from[i] === to[i]) i++;
@@ -41,12 +44,14 @@ export interface RewriteCfg {
   pinDeps?: string;
   /** Directory-offset for directory-index modules served at an extensionless URL (./y -> ./x/y). */
   extraDir?: string;
+  /** Committed .env* values (VITE_*, NODE_ENV…) merged into the import.meta.env shim. */
+  env?: Record<string, string>;
 }
 
 // Relative path from a module's served directory to a target DIRECTORY (for template-literal
 // import prefixes like "@/layouts/"): "./x" style, with "./" for the same directory.
 function relDirFrom(fromDir: string, toDir: string): string {
-  const from = fromDir ? fromDir.split("/") : [];
+  const from = fromDir ? fromDir.split("/").filter(Boolean) : [];
   const to = (toDir || "").split("/").filter(Boolean);
   let i = 0;
   while (i < from.length && i < to.length && from[i] === to[i]) i++;
@@ -92,6 +97,26 @@ function rewriteBareImports(js: string, cfg?: RewriteCfg): string {
     // A bare "." (import … from ".") means the module's own directory index in Vite
     // ("src/composables" -> src/composables/index.js); browsers reject "." outright.
     if (spec === "." || spec === "./") return `${ctx}${q}./index${endq}`;
+    // `virtual:*` imports (vite-plugin-svg-icons' `import "virtual:svg-icons-register"`, vite-plugin-
+    // vue-layouts' `virtual:generated-layouts`, etc.) are Vite-codegen modules with no real file.
+    // As a bare name they'd be mistaken for a "virtual:" URL scheme and blocked by the browser, so
+    // rewrite them to a synthetic module (siteRoot/__edgeqa_virtual__/<name>.js) that the SW serves
+    // as an empty ES module — a no-op side-effect import that lets the app boot without its SVG sprite.
+    if (spec.startsWith("virtual:")) {
+      const name = spec.slice("virtual:".length).replace(/[^A-Za-z0-9_\-/.\$]/g, "_") || "module";
+      const rootPrefix = cfg!.siteRoot ? cfg!.siteRoot + "/" : "";
+      return `${ctx}${q}${relFrom(cfg!.dir || "", rootPrefix + "__edgeqa_virtual__/" + name + ".js")}${endq}`;
+    }
+    // A bare *npm* subpath ending in .json (e.g. `import icons from "@iconify-json/ep/icons.json"`,
+    // the Iconify offline-icon pattern every admin uses) becomes an esm.sh URL that serves
+    // application/json — browsers reject JSON as a module script without an import assertion.
+    // Vite inlines those at build time; here we route them to the empty-module shim so the app
+    // boots (the icon collection just doesn't register — app-level data, not module failure).
+    if (/\/[A-Za-z0-9_.\-]+\.json$/.test(spec)) {
+      const name = "json-" + spec.replace(/[^A-Za-z0-9_.$-]/g, "_").replace(/\.json$/, "");
+      const rootPrefix = cfg!.siteRoot ? cfg!.siteRoot + "/" : "";
+      return `${ctx}${q}${relFrom(cfg!.dir || "", rootPrefix + "__edgeqa_virtual__/" + name + ".js")}${endq}`;
+    }
     if (spec.startsWith(".") || spec.startsWith("/") || /^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) return m;
     const rootPrefix = cfg!.siteRoot ? cfg!.siteRoot + "/" : "";
     const first = spec.split("/")[0];
@@ -130,14 +155,20 @@ function rewriteBareImports(js: string, cfg?: RewriteCfg): string {
 // Vite injects import.meta.env into every module; transpiled source still references it.
 // Provide a module-scoped shim (production semantics) so `import.meta.env.MODE` and friends
 // don't crash real apps (mirrors the SW's copy).
-function shimEnv(js: string): string {
+function shimEnv(js: string, env?: Record<string, string>): string {
   // Vite injects import.meta.env (and glob/hot glue) into every module; transpiled source still
   // references them. env gets production semantics; glob/globEager return an empty module map so
   // dynamic `for (const [path, loader] of Object.entries(import.meta.glob(...)))` loops iterate
   // nothing instead of crashing on an unregistered Vite-only API; hot is undefined. import.meta.url
   // is left untouched. Mirrors edgeqa-sw.js's copy.
   if (!/import\.meta\.(env|glob|globEager|hot)(?=[^A-Za-z0-9_$])/.test(js)) return js;
-  const shim = 'const __edgeqa_env = { MODE: "production", DEV: false, PROD: true, SSR: false, BASE_URL: "/" };'
+  const envLiteral = env && Object.keys(env).length
+    ? ", " + Object.entries(env).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(", ")
+    : "";
+  // Dev-flavored: a browser preview behaves like `vite dev`, and many apps branch on
+  // import.meta.env.DEV/PROD/MODE (`import.meta.env.DEV ? devConfig : window[...]`). Production
+  // semantics would push them down the wrong branch. Committed VITE_* values appended after.
+  const shim = `const __edgeqa_env = { MODE: "development", DEV: true, PROD: false, SSR: false, BASE_URL: "/"${envLiteral} };`
     + '\nconst __edgeqa_glob = () => ({});'
     + '\nconst __edgeqa_globEager = () => ({});'
     + '\nconst __edgeqa_hot = undefined;';
@@ -176,7 +207,7 @@ function remapPreactIsoHydrate(js: string): string {
 // relative, npm packages to esm.sh with version pins).
 function postProcessJs(js: string, cfg?: RewriteCfg): string {
   js = remapPreactIsoHydrate(js);
-  js = shimEnv(js);
+  js = shimEnv(js, cfg?.env);
   const extraDir = cfg?.extraDir;
   const offset = (u: string) => (extraDir ? `./${extraDir}/${u}` : u);
   const cssUrls: string[] = [];
@@ -206,6 +237,45 @@ function postProcessJs(js: string, cfg?: RewriteCfg): string {
 const componentName = (path: string) => (path.split("/").pop() || "Component").replace(/[^A-Za-z0-9_$]/g, "") || "Component";
 function simpleHash(s: string): string { let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; } return Math.abs(h).toString(36); }
 
+// sucrase's TypeScript transform elides imports it thinks are unused — but inside a Vue SFC's
+// <script> the compiler only sees the script body, so imports referenced exclusively in the
+// <template> (components, config objects) look unused and get stripped, breaking the render
+// (missing bindings). Preserve every value import whose specifier no longer appears in the
+// stripped output. `import type` and type-only forms are left elided (they don't exist at runtime).
+export function preserveSucraseImports(raw: string, stripped: string, templateText?: string): string {
+  // Without a template there is nothing the compiler can't see: sucrase only elides imports
+  // that are type-only or genuinely unused, and re-adding them would resurrect bindings that
+  // don't exist at runtime (e.g. `import { LanguageType } from "./stores/interface"` where the
+  // module exports only types). Only Vue SFCs — whose script body hides template-only usages —
+  // need the re-add, and only for names the template actually references.
+  if (!templateText) return stripped;
+  const out = [];
+  for (const m of raw.matchAll(/import\s+(?:[^;\n]*?\s+from\s+)?["']([^"']+)["']\s*;?/g)) {
+    const line = m[0];
+    if (/\bimport\s+type\b/.test(line)) continue;
+    // Binding names (named, default, or namespace): the template-referenced ones are why
+    // sucrase's script-only view stripped the line, so only those may come back. A type-only
+    // import's names never appear in the template and must stay elided.
+    let names: string[] = [];
+    const braces = line.match(/\{([^}]*)\}/);
+    if (braces) {
+      names = braces[1].split(",").map((s) => s.trim().split(/\s+as\s+/)[0].trim()).filter(Boolean);
+    } else {
+      const def = line.match(/import\s+([A-Za-z_$][\w$]*)\s+from/);
+      if (def) names = [def[1]];
+    }
+    if (names.length && !names.some((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(templateText))) continue;
+    const spec = m[1];
+    // Still present (same specifier, any binding shape) -> sucrase kept it.
+    // NOTE: template literals collapse a lone `\s` to a literal "s", so the regex must
+    // use `\\s` — otherwise `froms*` never matches `from 'vue'` and every import gets
+    // re-added, duplicating the ones sucrase kept (compileScript throws on duplicate ids).
+    if (new RegExp(`from\\s*["']${spec.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`).test(stripped)) continue;
+    out.push(line.replace(/;$/, "") + ";");
+  }
+  return out.length ? out.join("\n") + "\n" + stripped : stripped;
+}
+
 // Compile a .svelte file — component or Svelte 5 runes module (.svelte.ts/.svelte.js, whose
 // top-level $state/$derived need compiler transformation) — to final module text. Svelte embeds
 // the component's own CSS when css:injected, so the output is a single module with styles
@@ -226,7 +296,7 @@ export async function compileSvelteText(text: string, path: string, cfg?: Rewrit
     let source = text;
     if (/\.svelte\.ts$/i.test(path || "")) {
       const sucrase: any = await import(/* @vite-ignore */ `${ESM_CDN}sucrase`);
-      try { source = sucrase.transform(text, { transforms: ["typescript"] }).code || text; } catch { /* keep raw on failure */ }
+      try { source = preserveSucraseImports(text, sucrase.transform(text, { transforms: ["typescript"] }).code || text); } catch { /* keep raw on failure */ }
     }
     const result = svelte.compileModule(source, { filename: path, generate: "client", dev: false });
     return postProcessJs((result.js && result.js.code) || "", cfg);
@@ -277,7 +347,12 @@ export async function compileVueText(text: string, path: string, cfg?: RewriteCf
   // (compileScript re-reads the original source).
   if (/<script[^>]*\blang\s*=\s*["']ts/.test(text)) {
     const sucrase: any = await import(/* @vite-ignore */ `${ESM_CDN}sucrase`);
-    const stripBody = (body: string) => { try { return sucrase.transform(body, { transforms: ["typescript"] }).code || body; } catch { return body; } };
+    // Template-only bindings are why the re-add exists — pass the template so type-only
+    // imports (whose names never appear in it) stay elided instead of resurrected.
+    const templateText = (text.match(/<template[^>]*>([\s\S]*?)<\/template\s*>/) || [])[1] || "";
+    const stripBody = (body: string) => {
+      try { return preserveSucraseImports(body, sucrase.transform(body, { transforms: ["typescript"] }).code || body, templateText); } catch { return body; }
+    };
     text = text.replace(/(<script[^>]*>)([\s\S]*?)(<\/script\s*>)/g, (m, open, body, close) =>
       /\blang\s*=\s*["']ts/.test(open) ? open + stripBody(body) + close : m,
     );

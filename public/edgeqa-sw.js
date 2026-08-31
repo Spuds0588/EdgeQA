@@ -36,12 +36,16 @@ const aliasByScope = new Map();
 const localDirsByScope = new Map();
 const siteRootByScope = new Map();
 const depVersionsByScope = new Map();
+const envByScope = new Map();
 const publicByScope = new Map(); // tokenless sessions the generator verified as public
 
 // Resolve a site-root-relative target path from a module's (served) directory — the
 // same "relative to the importing module" semantics Vite gives aliases/baseUrl imports.
 function relFrom(fromDir, toPath) {
-  const from = fromDir ? fromDir.split("/") : [];
+  // Filter empty segments on BOTH sides: a module served at an extensionless directory URL
+  // (src/api) yields dir "src/api/" whose trailing empty segment would inflate `from.length`
+  // and emit a phantom extra "../". Mirrors the `to` side.
+  const from = fromDir ? fromDir.split("/").filter(Boolean) : [];
   const to = (toPath || "").split("/").filter(Boolean);
   let i = 0;
   while (i < from.length && i < to.length && from[i] === to[i]) i++;
@@ -94,7 +98,7 @@ async function ensureBabel() {
 // Relative path from a module's served directory to a target DIRECTORY (for template-literal
 // import prefixes like "@/layouts/"): "./x" style, with "./" for the same directory.
 function relDirFrom(fromDir, toDir) {
-  const from = fromDir ? fromDir.split("/") : [];
+  const from = fromDir ? fromDir.split("/").filter(Boolean) : [];
   const to = (toDir || "").split("/").filter(Boolean);
   let i = 0;
   while (i < from.length && i < to.length && from[i] === to[i]) i++;
@@ -136,6 +140,26 @@ function rewriteBareImports(js, cfg) {
     // A bare "." (import … from ".") means the module's own directory index in Vite
     // ("src/composables" -> src/composables/index.js); browsers reject "." outright.
     if (spec === "." || spec === "./") return `${ctx}${q}./index${endq}`;
+    // `virtual:*` imports (vite-plugin-svg-icons' `import "virtual:svg-icons-register"`, vite-plugin-
+    // vue-layouts' `virtual:generated-layouts`, etc.) are Vite-codegen modules with no real file.
+    // As a bare name they'd be mistaken for a "virtual:" URL scheme and blocked by the browser, so
+    // rewrite them to a synthetic module (siteRoot/__edgeqa_virtual__/<name>.js) that this SW serves
+    // as an empty ES module — a no-op side-effect import that lets the app boot without its SVG sprite.
+    if (spec.startsWith("virtual:")) {
+      const name = spec.slice("virtual:".length).replace(/[^A-Za-z0-9_\-/.\$]/g, "_") || "module";
+      const rootPrefix = cfg.siteRoot ? cfg.siteRoot + "/" : "";
+      return `${ctx}${q}${relFrom(cfg.dir || "", rootPrefix + "__edgeqa_virtual__/" + name + ".js")}${endq}`;
+    }
+    // A bare *npm* subpath ending in .json (e.g. `import icons from "@iconify-json/ep/icons.json"`,
+    // the Iconify offline-icon pattern every admin uses) becomes an esm.sh URL that serves
+    // application/json — browsers reject JSON as a module script without an import assertion.
+    // Vite inlines those at build time; here we route them to the empty-module shim so the app
+    // boots (the icon collection just doesn't register — app-level data, not module failure).
+    if (/\/[A-Za-z0-9_.\-]+\.json$/.test(spec)) {
+      const name = "json-" + spec.replace(/[^A-Za-z0-9_.$-]/g, "_").replace(/\.json$/, "");
+      const rootPrefix = cfg.siteRoot ? cfg.siteRoot + "/" : "";
+      return `${ctx}${q}${relFrom(cfg.dir || "", rootPrefix + "__edgeqa_virtual__/" + name + ".js")}${endq}`;
+    }
     if (spec.startsWith(".") || spec.startsWith("/") || /^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) return m;
     // Local dirs and aliases are relative to the *site root* (the sandbox document dir),
     // so targets are prefixed with it before computing the module-relative path.
@@ -194,14 +218,22 @@ function transpileModule(code, path, extraDir, cfg) {
 // Vite injects import.meta.env into every module; transpiled source still references it.
 // Provide a module-scoped shim (production semantics) so `import.meta.env.MODE` and friends
 // don't crash real apps. Real VITE_* vars are unknowable here — they read as undefined.
-function shimEnv(js) {
+// env (optional) carries committed `.env*` file values (see envFor) so `import.meta.env.VITE_*`
+// resolves to the repo's declared config instead of undefined.
+function shimEnv(js, env) {
   // Vite injects import.meta.env (and glob/hot glue) into every module; transpiled source still
   // references them. env gets production semantics; glob/globEager return an empty module map so
   // dynamic `for (const [path, loader] of Object.entries(import.meta.glob(...)))` loops iterate
   // nothing instead of crashing on an unregistered Vite-only API; hot is undefined. import.meta.url
   // is left untouched. Mirrors frame.ts's copy.
   if (!/import\.meta\.(env|glob|globEager|hot)(?=[^A-Za-z0-9_$])/.test(js)) return js;
-  const shim = 'const __edgeqa_env = { MODE: "production", DEV: false, PROD: true, SSR: false, BASE_URL: "/" };'
+  const envLiteral = env && Object.keys(env).length
+    ? ", " + Object.entries(env).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(", ")
+    : "";
+  // Dev-flavored: a browser preview behaves like `vite dev`, and many apps branch on
+  // import.meta.env.DEV/PROD/MODE (`import.meta.env.DEV ? devConfig : window[...]`). Production
+  // semantics would push them down the wrong branch. Committed VITE_* values appende after.
+  const shim = `const __edgeqa_env = { MODE: "development", DEV: true, PROD: false, SSR: false, BASE_URL: "/"${envLiteral} };`
     + '\nconst __edgeqa_glob = () => ({});'
     + '\nconst __edgeqa_globEager = () => ({});'
     + '\nconst __edgeqa_hot = undefined;';
@@ -271,7 +303,7 @@ const ROUTER_AUTO_IMPORTS = ["useRoute", "useRouter", "useLink", "onBeforeRouteL
 
 function postProcessJs(js, cfg, extraDir) {
   js = remapPreactIsoHydrate(js);
-  js = shimEnv(js);
+  js = shimEnv(js, cfg && cfg.env);
   const offset = (u) => (extraDir ? `./${extraDir}/${u}` : u);
   const cssUrls = [];
   // CSS modules: `import style from './x.module.css'` binds a class map (style.foo). We serve
@@ -463,6 +495,52 @@ async function depVersionsFor(info) {
   return map;
 }
 
+// Load committed .env* files (the repo's own published config) into a VITE_* / NODE_ENV
+// … map so `import.meta.env.VITE_*` resolves in transpiled source. Vite loads .env, .env.local,
+// .env.[mode], and .env.[mode].local; a prod-shaped build reads .env + .env.production. We merge
+// .env then mode files (later wins) so the app's declared VITE_* config survives. Cached per scope.
+async function envFor(info) {
+  const scope = scopeOf(info);
+  if (envByScope.has(scope)) return envByScope.get(scope);
+  const siteRoot = siteRootByScope.get(scope) || "";
+  const token = tokenByScope.get(scope);
+  const roots = siteRoot ? [siteRoot.replace(/\/+$/g, ""), ""] : [""];
+  const out = {};
+  // Dev-flavored: vite dev loads .env, .env.local, then .env.development (later wins). We read
+  // only the committed *.env* files the repo publishes — never the operator's local secrets.
+  const FILES = [".env", ".env.local", ".env.development"];
+  for (const root of roots) {
+    for (const file of FILES) {
+      try {
+        const path = root ? root + "/" + file : file;
+        let text = "";
+        if (token) {
+          const ep = `https://api.github.com/repos/${encodeURIComponent(info.owner)}/${encodeURIComponent(info.repo)}/contents/${path}?ref=${encodeURIComponent(info.branch)}`;
+          const res = await fetch(ep, { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` } });
+          if (res.ok) {
+            const item = await res.json();
+            if (item && item.content) text = new TextDecoder().decode(decodeBase64(item.content));
+          }
+        } else {
+          const raw = await fetch(`https://raw.githubusercontent.com/${info.owner}/${info.repo}/${info.branch}/${path}`);
+          if (raw.ok) text = await raw.text();
+        }
+        if (!text) continue;
+        for (const line of text.split(/\r?\n/)) {
+          const m = line.replace(/\s*#.*/, "").match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+          if (m) {
+            let v = (m[2] || "").trim();
+            v = v.replace(/^["']|["']$/g, "");
+            if (v) out[m[1]] = v;
+          }
+        }
+      } catch { /* try next */ }
+    }
+  }
+  envByScope.set(scope, out);
+  return out;
+}
+
 self.addEventListener("install", () => { log("install: skipping wait"); self.skipWaiting(); });
 self.addEventListener("activate", (event) => {
   log("activate: claiming clients");
@@ -565,13 +643,37 @@ async function resolveModule(info, token) {
   const dir = slash >= 0 ? info.path.slice(0, slash) : "";
   const name = info.path.slice(slash + 1);
   const prefix = dir ? dir + "/" : "";
+  // TS projects with "allowJs"/NodeNext-style ESM write `./foo.js` to import a .ts file
+  // (`import { x } from './screenLock.js'` where the file is './screenLock.ts'). A name ending
+  // in a source extension should also try every other source extension pinned to the same stem
+  // (screenLock.js -> screenLock.ts), not just append extensions onto itself (screenLock.js.js).
+  // A name ending in a SINGLE source extension may be a Svelte runes module written with an
+  // ESM-style specifier (`import './lib/state.svelte'` where the file is 'state.svelte.ts'),
+  // so probe full-name + every extension FIRST (state.svelte -> state.svelte.ts). Only when
+  // the name itself is a js/ts-family extension (screenLock.js -> screenLock.ts, the
+  // allowJs/NodeNext convention) also probe the stem-swapped variants — never strip .svelte
+  // or .vue off the name, or state.svelte would resolve to an unrelated state.ts.
+  const singleSrc = /\.(ts|tsx|js|jsx|mjs|mts)$/i.test(name);
+  const nameStem = singleSrc ? name.replace(/\.(ts|tsx|js|jsx|mjs|mts)$/i, "") : name;
   for (const ext of SOURCE_EXTS) {
     const cand = `${prefix}${name}.${ext}`;
     const r = await githubFileSafe({ ...info, path: cand }, token);
     if (r && r.status === 200) return { ...info, path: cand };
   }
+  if (singleSrc) {
+    for (const ext of SOURCE_EXTS) {
+      const cand = `${prefix}${nameStem}.${ext}`;
+      const r = await githubFileSafe({ ...info, path: cand }, token);
+      if (r && r.status === 200) return { ...info, path: cand };
+    }
+  }
   for (const ext of SOURCE_EXTS) {
     const cand = `${prefix}${name}/index.${ext}`;
+    const r = await githubFileSafe({ ...info, path: cand }, token);
+    if (r && r.status === 200) return { ...info, path: cand };
+  }
+  for (const ext of SOURCE_EXTS) {
+    const cand = `${prefix}${nameStem}/index.${ext}`;
     const r = await githubFileSafe({ ...info, path: cand }, token);
     if (r && r.status === 200) return { ...info, path: cand };
   }
@@ -582,6 +684,13 @@ self.addEventListener("fetch", (event) => {
   log("intercept", info.owner + "/" + info.repo + "/" + info.branch + "/" + info.path);
   postDebug({ intercept: info.path, preset: presetByScope.get(scopeOf(info)) || "" });
   event.respondWith((async () => {
+    // Synthetic virtual modules (vite-plugin-svg-icons etc.) are rewritten to
+    // __edgeqa_virtual__/<name>.js by rewriteBareImports; serve an empty ES module so the
+    // importing app boots without its Vite-codegen module (SVG sprite, generated routes…).
+    if (info.path.startsWith("__edgeqa_virtual__/")) {
+      log("virtual module shim", info.path);
+      return new Response("/* edgeqa virtual module */\nexport default {};\n", { status: 200, headers: { "Content-Type": "application/javascript" } });
+    }
     const cache = await caches.open(CACHE_NAME);
     const cached = await cache.match(event.request);
     // HTML documents are always revalidated so a dev's push lands on the tester's next
@@ -630,6 +739,7 @@ self.addEventListener("fetch", (event) => {
     // repo's pinned dependency versions (fetched lazily from package.json).
     if (preset && response && response.status === 200) {
       const depVersions = await depVersionsFor(info);
+      const env = await envFor(info);
       let servedDir = "";
       if (info.path.includes("/")) {
         servedDir = info.path.slice(0, info.path.lastIndexOf("/"));
@@ -641,7 +751,7 @@ self.addEventListener("fetch", (event) => {
       // of every esm.sh import so the whole graph shares ONE copy (duplicates break hooks).
       const frameworkPins = preset === "vue" ? ["vue"] : preset === "svelte" ? ["svelte"] : ["react", "react-dom", "preact"];
       const pinDeps = frameworkPins.map(pin).filter(Boolean).join(",");
-      const cfg = { dir: servedDir, aliasMap: aliasByScope.get(scopeOf(info)), localDirs: localDirsByScope.get(scopeOf(info)), depVersions, siteRoot: siteRootByScope.get(scopeOf(info)) || "", pinDeps, token, requestDest: event.request.destination, preset, extraDir: extraDir || "" };
+      const cfg = { dir: servedDir, aliasMap: aliasByScope.get(scopeOf(info)), localDirs: localDirsByScope.get(scopeOf(info)), depVersions, siteRoot: siteRootByScope.get(scopeOf(info)) || "", pinDeps, token, requestDest: event.request.destination, preset, extraDir: extraDir || "", env };
       const transformed = await applyPreset(response, info, extraDir, preset, cfg);
       if (transformed) { log("preset", preset, "applied to", info.path); response = transformed; }
     }
