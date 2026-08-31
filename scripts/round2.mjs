@@ -84,6 +84,28 @@ const REPOS = [
   // (offline-first static CRM SPA).
   { id: "ziplayer", repo: "Spuds0588/ZipLayer", branch: "main", path: "", preset: "", expect: /zip|Zip|download/i },
   { id: "sparrow-crm", repo: "Spuds0588/Sparrow-Offline-CRM", branch: "main", path: "", preset: "", expect: /sparrow|Sparrow|CRM|customer|client/i, expectHtml: true },
+  // ---- Round 5: fresh real apps stressing new building blocks ----
+  // reactflow-vite: the React Flow (now @xyflow/react) official Vite example — real node/canvas
+  // app on a heavy maintained library. Stresses alias-free Vite resolution + a large dep tree.
+  { id: "reactflow-vite", repo: "xyflow/react-flow-example-apps", branch: "main", path: "reactflow-vite", preset: "react", expect: /React Flow|reactflow|node|canvas|edge/i },
+  // r3f-example: the react-three-fiber repo's own bundled example — three.js + @react-three/drei
+  // + zustand + wouter through the esm.sh build servers. WebGL in headless Chromium likely can't
+  // paint, but the 3D scene + HUD must mount without module-tier failures.
+  { id: "r3f-example", repo: "pmndrs/react-three-fiber", branch: "master", path: "example", preset: "react", expect: null },
+  // vue-pure-admin: a mammoth real Vue3 + Vite + Element-Plus + Pinia admin (60+ runtime deps,
+  // mock-service-worker, vite plugin codegen, import.meta.glob route/table maps). The in-browser
+  // build tier isn't expected to boot the full app — it must degrade cleanly to the Document root,
+  // not crash the module graph.
+  { id: "vue-pure-admin", repo: "pure-admin/vue-pure-admin", branch: "main", path: "", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true, loadTimeout: 90_000 },
+  // vue-naive-admin: real Vue3 + Vite + Pinia + UnoCSS admin using Naive UI. Naive UI is heavy
+  // but published — a realistic test of a component-library admin booting from source.
+  { id: "vue-naive-admin", repo: "zclzone/vue-naive-admin", branch: "2.x", path: "", preset: "vue", alias: "@:src", local: "src", expect: /登录|登录页|n-config-provider|admin|naive|体验/i, loadTimeout: 90_000 },
+  // trucast: a real Svelte 5 (runes) + TS + Vite static weather app — the first Svelte 5-runes
+  // repo in the suite, so it stresses the Svelte 5 compiler/CSS/script-block paths, not classic
+  // Svelte 3/4 syntax. Vanilla Svelte, zero runtime deps beyond the compiler.
+  { id: "trucast", repo: "CrooksJeremy/TrueCast-Weather", branch: "main", path: "", preset: "svelte", local: "src", expect: /weather|Weather|forecast|TrueCast|humidity|wind/i, expectHtml: true },
+  // mismo: author's fresh MISMO 3.4 XML library + browser demo (vanilla web component, tokenless).
+  { id: "mismo", repo: "Spuds0588/MISMO.js", branch: "main", path: "", preset: "", expect: /MISMO|mismo|XML|xml|demo|generate/i, expectHtml: true },
 ];
 
 const results = [];
@@ -151,7 +173,7 @@ async function runRepo(browser, entry) {
     frame.on("console", (msg) => {
       if (msg.type() === "error" || msg.type() === "warning") frameLogs.push(`${msg.type()}: ${msg.text().slice(0, 250)}`);
     });
-    await frame.waitForLoadState("load", { timeout: 30_000 });
+    await frame.waitForLoadState("load", { timeout: entry.loadTimeout || 30_000 });
     // Give the app's JS time to boot (esm.sh imports, framework mount)
     await page.waitForTimeout(entry.preset ? 14_000 : 7_000);
     const snapshot = await frame.evaluate(() => {

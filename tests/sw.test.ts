@@ -382,6 +382,20 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(fetchMock.mock.calls.some(([u]) => u.includes("/src/main.tsx") && u.includes("raw.githubusercontent"))).toBe(false); // no entry probing
   });
 
+  it("preset scope: template-literal alias imports keep a SINGLE backtick (regression for doubled `` ``)", async () => {
+    const src = "export const c = () => import(`@/layouts/${name}/index.vue`);";
+    const sw = makeSW(htmlFetch(src), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", alias: { "@": "src" }, localDirs: ["src"], siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
+    const text = await res.text();
+    // ctx (the import( ) group) already ends with the opening backtick — the rewrite must
+    // re-emit only the closing one. A doubled opening backtick breaks the module with
+    // "SyntaxError: Unexpected token '/'" (real vue-naive-admin bug).
+    expect(text).toContain("import(`./layouts/${name}/index.vue`)");
+    expect(text).not.toContain("import(``"); // never a doubled opening backtick
+    expect(text).not.toContain("@/layouts"); // alias prefix rewritten away
+  });
+
   it("preset scope: a rewritten bare import is byte-exact (no offset leaked after the specifier)", async () => {
     const sw = makeSW(htmlFetch(`import { createStore } from \"redux\";\nimport app from \"./app.js\";`), { Babel: { transform: (c: string) => ({ code: c }) } });
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "jsx" });

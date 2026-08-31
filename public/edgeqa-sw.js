@@ -42,13 +42,18 @@ const publicByScope = new Map(); // tokenless sessions the generator verified as
 // same "relative to the importing module" semantics Vite gives aliases/baseUrl imports.
 function relFrom(fromDir, toPath) {
   const from = fromDir ? fromDir.split("/") : [];
-  const to = toPath.split("/");
+  const to = (toPath || "").split("/").filter(Boolean);
   let i = 0;
   while (i < from.length && i < to.length && from[i] === to[i]) i++;
   const ups = from.length - i;
   const down = to.slice(i).join("/");
   // Browsers require relative specifiers to start with "./" or "../" — a bare name is an error.
-  return ups ? "../".repeat(ups) + down : down ? "./" + down : ".";
+  // A target that equals the importer's own directory (e.g. "@/store" re-exported from inside
+  // src/store/) must step up one level and back in ("../store"), not emit an invalid "." — the
+  // importing module is a FILE in that directory, so "." would point at the directory URL.
+  if (down) return (ups ? "../".repeat(ups) : "./") + down;
+  if (!ups && from.length) return "../" + from[from.length - 1];
+  return ups ? "../".repeat(ups) : "./";
 }
 
 // importScripts() is only legal in a service worker during install/evaluation, so load
@@ -86,10 +91,52 @@ async function ensureBabel() {
 //     the repo's package.json version when known (esm.sh serves the LATEST by default,
 //     which breaks apps built against older pins).
 // Relative (./), absolute (/), and URL (https:/data:...) specifiers are left untouched.
+// Relative path from a module's served directory to a target DIRECTORY (for template-literal
+// import prefixes like "@/layouts/"): "./x" style, with "./" for the same directory.
+function relDirFrom(fromDir, toDir) {
+  const from = fromDir ? fromDir.split("/") : [];
+  const to = (toDir || "").split("/").filter(Boolean);
+  let i = 0;
+  while (i < from.length && i < to.length && from[i] === to[i]) i++;
+  const ups = from.length - i;
+  const down = to.slice(i).join("/");
+  return (ups ? "../".repeat(ups) : "./") + down;
+}
+
 function rewriteBareImports(js, cfg) {
   cfg = cfg || {};
+  // Template-literal specifiers with a static alias/local-dir prefix (import(`@/layouts/${name}/index.vue`))
+  // also can't resolve as-is — rewrite the static prefix to a module-relative path, keep the ${...} parts.
+  js = js.replace(/((?:from\s+|import\s*\(|(?:^|[\n]\s*)import\s+|export\s+[^;]*?from\s+)\s*`)([^`]*?)`/g, (m, ctx, tpl) => {
+    if (!tpl.includes("${")) return m;
+    const segs = tpl.split("${");
+    const pre = segs[0];
+    if (!pre || (!/^[@$]/.test(pre) && !(cfg.localDirs || []).some((d) => pre === d + "/" || pre.startsWith(d + "/")))) return m;
+    const rootPrefix = cfg.siteRoot ? cfg.siteRoot + "/" : "";
+    let target = "";
+    if (cfg.aliasMap) {
+      for (const [key, root] of Object.entries(cfg.aliasMap)) {
+        if (pre === key + "/" || pre.startsWith(key + "/")) { target = root + pre.slice(key.length); break; }
+      }
+    }
+    if (!target && cfg.localDirs) {
+      for (const d of cfg.localDirs) {
+        if (pre === d + "/" || pre.startsWith(d + "/")) { target = pre; break; }
+      }
+    }
+    if (!target) return m;
+    const relDir = relDirFrom(cfg.dir || "", rootPrefix + target.replace(/\/+$/, ""));
+    const sep = relDir.endsWith("/") ? "" : "/";
+    // ctx already ends with the opening backtick (it's part of the alternation group),
+    // so only re-emit the closing one.
+    return ctx + relDir + sep + "${" + segs.slice(1).join("${") + "`";
+  });
   return js.replace(/((?:from\s+|import\s*\(|(?:^|[\n]\s*)import\s+|export\s+[^;]*?from\s+))(["'])([^\s"']+)(\2)/g, (m, ctx, q, spec, endq) => {
-    if (!spec || spec.startsWith(".") || spec.startsWith("/") || /^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) return m;
+    if (!spec) return m;
+    // A bare "." (import … from ".") means the module's own directory index in Vite
+    // ("src/composables" -> src/composables/index.js); browsers reject "." outright.
+    if (spec === "." || spec === "./") return `${ctx}${q}./index${endq}`;
+    if (spec.startsWith(".") || spec.startsWith("/") || /^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) return m;
     // Local dirs and aliases are relative to the *site root* (the sandbox document dir),
     // so targets are prefixed with it before computing the module-relative path.
     const rootPrefix = cfg.siteRoot ? cfg.siteRoot + "/" : "";
@@ -140,16 +187,8 @@ function transpileModule(code, path, extraDir, cfg) {
   const presets = isTs ? [["react", jsxOpts], "typescript"] : [["react", jsxOpts]];
   const plugins = [["proposal-decorators", { legacy: true }], ["proposal-class-properties", { loose: true }]];
   const out = self.Babel.transform(code, { presets, plugins, filename: path, sourceMaps: false, comments: false });
-  let js = out.code || "";
-  // A directory-index module (./x -> ./x/index.jsx) is served at the extensionless URL
-  // `/…/x`, so the browser resolves sibling imports (`./y`) against `/…` — one level up.
-  // Real Vite rewrites those specifiers to the resolved path; here we prefix every
-  // relative specifier with the directory offset (./y -> ./x/y, ../y -> ./y) so they
-  // resolve against the module's true folder.
-  if (extraDir) {
-    js = js.replace(/((?:from\s+|import\s*\(|import\s+|export\s+[^;]*?from\s+))(["'])((?:\.\.?\/)[^"']*)/g, (m, ctx, q, rel) => `${ctx}${q}./${extraDir}/${rel}`);
-  }
-  return postProcessJs(js, cfg);
+  // postProcessJs applies the directory-index extraDir offset (and everything else).
+  return postProcessJs(out.code || "", cfg, extraDir);
 }
 
 // Vite injects import.meta.env into every module; transpiled source still references it.
@@ -204,6 +243,32 @@ function remapPreactIsoHydrate(js) {
   });
 }
 
+// unplugin-auto-import lets real Vue apps use the Composition API + vue-router helpers in
+// .vue AND .js/.ts modules without importing them (the plugin injects the imports at build
+// time). The browser can't run that codegen, so compile-time here: for each standard
+// auto-imported name the module actually references but never binds, inject the real import.
+// Mirrors the page-side copy in frame.ts.
+function injectVueAutoImports(code) {
+  const bound = new Set();
+  for (const m of code.matchAll(/import\s*\{([^}]*)\}\s*from\s*["'][^"']+["']/g)) {
+    for (const part of m[1].split(",")) {
+      const name = part.trim().split(/\s+as\s+/)[0].trim();
+      if (name) bound.add(name);
+    }
+  }
+  for (const m of code.matchAll(/import\s+([A-Za-z_$][\w$]*)\s+from\s*["'][^"']+["']/g)) bound.add(m[1]);
+  for (const m of code.matchAll(/import\s*\*\s*as\s+([A-Za-z_$][\w$]*)/g)) bound.add(m[1]);
+  for (const m of code.matchAll(/\b(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)) bound.add(m[1]);
+  const inject = (names, from) => {
+    const need = names.filter((n) => !bound.has(n) && new RegExp(`\\b${n}\\b`).test(code));
+    return need.length ? `import { ${need.join(", ")} } from "${from}";` : "";
+  };
+  const lines = [inject(VUE_AUTO_IMPORTS, "vue"), inject(ROUTER_AUTO_IMPORTS, "vue-router")].filter(Boolean);
+  return lines.length ? lines.join("\n") + "\n" + code : code;
+}
+const VUE_AUTO_IMPORTS = ["ref", "reactive", "computed", "watch", "watchEffect", "watchPostEffect", "watchSyncEffect", "onMounted", "onUnmounted", "onBeforeUnmount", "onUpdated", "onBeforeMount", "onBeforeUpdate", "onActivated", "onDeactivated", "onErrorCaptured", "onRenderTracked", "onRenderTriggered", "onScopeDispose", "onServerPrefetch", "nextTick", "toRef", "toRefs", "toValue", "provide", "inject", "getCurrentInstance", "h", "createApp", "defineAsyncComponent", "markRaw", "shallowRef", "shallowReactive", "isRef", "unref", "isReactive", "isReadonly", "readonly", "customRef", "triggerRef", "effectScope", "getCurrentScope", "useAttrs", "useSlots", "useTemplateRef", "useId", "useModel", "mergeProps", "isProxy", "toRaw", "isShallow", "isVNode", "cloneVNode", "defineComponent"];
+const ROUTER_AUTO_IMPORTS = ["useRoute", "useRouter", "useLink", "onBeforeRouteLeave", "onBeforeRouteUpdate"];
+
 function postProcessJs(js, cfg, extraDir) {
   js = remapPreactIsoHydrate(js);
   js = shimEnv(js);
@@ -222,6 +287,19 @@ function postProcessJs(js, cfg, extraDir) {
     const injector = cssUrls.map((u) => `(()=>{const l=document.createElement("link");l.rel="stylesheet";l.href=new URL(${JSON.stringify(u)},import.meta.url).href;document.head.appendChild(l);})();`).join("");
     js = injector + js;
   }
+  // Directory-index modules (./x -> ./x/index.js) are served at the extensionless URL
+  // `/…/x`, so the browser resolves sibling imports (`./y`) against `/…` — one level up.
+  // Real Vite rewrites those specifiers to the resolved path; here we prefix every relative
+  // specifier with the directory offset (./y -> ./x/y, ../y -> ./x/../y) so they resolve
+  // against the module's true folder. Runs after the CSS/asset rewrites so those specifiers
+  // aren't double-offset. (transpileModule also ends here, so this covers the JSX tiers.)
+  if (extraDir) {
+    js = js.replace(/((?:from\s+|import\s*\(|(?:^|[\n]\s*)import\s+|export\s+[^;]*?from\s+))(["'])((?:\.\.?\/)[^"']*)/g, (m, ctx, q, rel) => `${ctx}${q}./${extraDir}/${rel}`);
+  }
+  // Vue apps commonly auto-import the Composition API in plain .js/.ts modules too — inject
+  // the real imports so those modules don't ReferenceError. Compiled .vue output already gets
+  // this on the page; raw .js/.mjs under the vue preset needs it here.
+  if (cfg && cfg.preset === "vue") js = injectVueAutoImports(js);
   return rewriteBareImports(js, cfg);
 }
 
@@ -311,7 +389,10 @@ async function applyPreset(res, info, extraDir, preset, cfg) {
       return new Response(transformHtml(text) + routerFix + "<!--SW-DONE-->", { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
     const jsResp = (marker, body) => new Response(marker + body, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
-    if (preset === "svelte" && /\.svelte$/i.test(p)) {
+    // .svelte components AND Svelte 5 runes modules (.svelte.ts/.svelte.js, which hold top-level
+    // $state/$derived that the browser can't parse). Without the runes-module match they'd fall
+    // through to the plain TS/Babel branch below and keep literal `$state` -> ReferenceError.
+    if (preset === "svelte" && /\.svelte(?:\.(?:js|ts))?$/i.test(p)) {
       const text = await res.text();
       const r = await compileViaClient("svelte", text, p, cfg);
       return jsResp(r.ok ? "/*SW-SVELTE*/" : "/*SW-SVELTE-FAIL*/", r.ok ? r.code : text);
@@ -560,7 +641,7 @@ self.addEventListener("fetch", (event) => {
       // of every esm.sh import so the whole graph shares ONE copy (duplicates break hooks).
       const frameworkPins = preset === "vue" ? ["vue"] : preset === "svelte" ? ["svelte"] : ["react", "react-dom", "preact"];
       const pinDeps = frameworkPins.map(pin).filter(Boolean).join(",");
-      const cfg = { dir: servedDir, aliasMap: aliasByScope.get(scopeOf(info)), localDirs: localDirsByScope.get(scopeOf(info)), depVersions, siteRoot: siteRootByScope.get(scopeOf(info)) || "", pinDeps, token, requestDest: event.request.destination, preset };
+      const cfg = { dir: servedDir, aliasMap: aliasByScope.get(scopeOf(info)), localDirs: localDirsByScope.get(scopeOf(info)), depVersions, siteRoot: siteRootByScope.get(scopeOf(info)) || "", pinDeps, token, requestDest: event.request.destination, preset, extraDir: extraDir || "" };
       const transformed = await applyPreset(response, info, extraDir, preset, cfg);
       if (transformed) { log("preset", preset, "applied to", info.path); response = transformed; }
     }
