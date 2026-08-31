@@ -134,7 +134,10 @@ function rewriteBareImports(js, cfg) {
 // relative paths, npm packages to esm.sh) so the browser resolves them without an import map.
 function transpileModule(code, path, extraDir, cfg) {
   const isTs = /\.tsx?$/i.test(path);
-  const presets = isTs ? [["react", { runtime: "automatic" }], "typescript"] : [["react", { runtime: "automatic" }]];
+  // Preact apps must compile JSX against preact's own runtime (preact/jsx-runtime) — the
+  // React runtime produces React elements that preact's render can't mount (silently empty).
+  const jsxOpts = { runtime: "automatic", ...(cfg && cfg.preset === "preact" ? { importSource: "preact" } : {}) };
+  const presets = isTs ? [["react", jsxOpts], "typescript"] : [["react", jsxOpts]];
   const plugins = [["proposal-decorators", { legacy: true }], ["proposal-class-properties", { loose: true }]];
   const out = self.Babel.transform(code, { presets, plugins, filename: path, sourceMaps: false, comments: false });
   let js = out.code || "";
@@ -189,10 +192,30 @@ function rewriteAssetUrl(url, cfg) {
   return m ? m[2] : url;
 }
 
+// preact-iso SSG sites call hydrate(<App/>, container) — with no prerendered HTML in a
+// browser-only preview, hydrate renders nothing. preact-iso doesn't export render, so drop
+// hydrate from its import and bind render (from preact) under the hydrate name instead.
+function remapPreactIsoHydrate(js) {
+  return js.replace(/(import\s*\{)([^}]*?)(\}\s*from\s*["']preact-iso["'])/g, (m, head, names, tail) => {
+    if (!/\bhydrate\b/.test(names)) return m;
+    const rest = names.replace(/\bhydrate\b\s*,\s*/, "").replace(/\s*,\s*\bhydrate\b/, "").replace(/\s+/, " ").trim();
+    const isoImport = rest ? `${head}${rest}${tail}` : "";
+    return `import { render as hydrate } from 'preact';\n${isoImport}`.replace(/\n$/, "");
+  });
+}
+
 function postProcessJs(js, cfg, extraDir) {
+  js = remapPreactIsoHydrate(js);
   js = shimEnv(js);
   const offset = (u) => (extraDir ? `./${extraDir}/${u}` : u);
   const cssUrls = [];
+  // CSS modules: `import style from './x.module.css'` binds a class map (style.foo). We serve
+  // the source CSS unhashed, so a Proxy that returns the key as the class name matches the
+  // real selectors. Must run before the generic CSS-strip below, which would drop the binding.
+  js = js.replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+(['"])([^'"]+?\.module\.(?:css|scss|sass|less|styl))\2/g, (m, name, q, url) => {
+    cssUrls.push(offset(rewriteAssetUrl(url, cfg)));
+    return `const ${name} = new Proxy({}, { get: (_t, k) => (typeof k === "string" ? k : "") });`;
+  });
   js = js.replace(/(?:import\s+(?:[^'"]*?\s+from\s+)?)(['"])([^'"]+?\.(?:css|scss|sass|less|styl))\1/g, (m, q, url) => { cssUrls.push(offset(rewriteAssetUrl(url, cfg))); return ""; });
   js = js.replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+(['"])([^'"]+?\.(?:png|jpe?g|gif|webp|svg|ico|avif|bmp|mp4|webm|mp3|wav|ogg|woff2?|ttf|eot))\2/g, (m, name, q, url) => `const ${name} = new URL(${q}${offset(url)}${q}, import.meta.url).href;`);
   if (cssUrls.length) {
@@ -230,19 +253,61 @@ function transformHtml(html) {
   return html.replace(/((?:src|href|poster)=[""])\/(?!\/)([^""]*)/g, (m, pre, p) => `${pre}${p}`);
 }
 
+// CRA/rollup/webpack-style repos commit an index.html that references build output (or
+// nothing at all — CRA's dev template has no script tag; the bundler injects it). Under an
+// active preset, bridge those documents to the repo's real source entry: probe the
+// conventional Vite/CRA entries relative to the document's directory and rewrite the HTML
+// to load the first one that exists. Returns the possibly-rewritten HTML.
+const ENTRY_CANDIDATES = ["src/main.tsx", "src/main.jsx", "src/main.ts", "src/main.js", "src/index.tsx", "src/index.jsx", "src/index.ts", "src/index.js", "main.jsx", "main.tsx", "main.js"];
+const ARTIFACT_SCRIPT_RE = /\/(?:build|dist|out|output|static|bundles|bundle)\/[^"']*\.js$|\/(?:bundle|vendor)\.[a-z0-9]+\.js$/i;
+async function bridgeHtmlEntry(html, info, token) {
+  const scripts = [...html.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>\s*<\/script>/gi)].map((m) => ({ tag: m[0], src: m[1] }));
+  const artifactRefs = scripts.filter((s) => ARTIFACT_SCRIPT_RE.test(s.src));
+  // Vite-style docs reference real source files (./src/main.tsx) — nothing to bridge.
+  // A doc with NO scripts (CRA template) or with artifact refs (rollup/webpack) needs the entry.
+  if (scripts.length && !artifactRefs.length) return html;
+  const docDir = info.path.includes("/") ? info.path.slice(0, info.path.lastIndexOf("/")) : "";
+  const ups = docDir ? docDir.split("/").length : 0;
+  const relPrefix = ups ? "../".repeat(ups) : "";
+  // Probe conventional entries relative to the document's directory first (standard Vite/CRA
+  // layout: index.html + src/ at the app root), then relative to the repo root (legacy
+  // CRA/rollup templates keep index.html in public/ but src/ at the repo root). The injected
+  // src must stay relative to the DOCUMENT, hence the ../-prefix for repo-root entries.
+  const candidates = [
+    ...ENTRY_CANDIDATES.map((c) => ({ probe: docDir ? docDir + "/" + c : c, rel: c })),
+    ...ENTRY_CANDIDATES.map((c) => ({ probe: c, rel: relPrefix + c })),
+  ];
+  for (const { probe, rel } of candidates) {
+    const r = await githubFileSafe({ ...info, path: probe }, token);
+    if (r && r.status === 200) {
+      log("bridged html entry", info.path, "->", rel);
+      let out = html;
+      for (const s of artifactRefs) out = out.replace(s.tag, "");
+      const inject = `  <script type="module" src="${rel}"></script>\n`;
+      return /<\/body>/i.test(out) ? out.replace(/<\/body>/i, inject + "</body>") : out + inject;
+    }
+  }
+  return html;
+}
+
 // Returns a transformed Response, or null when no transform applies (or the compiler for the
 // active preset is unavailable) so the caller serves the original bytes.
 async function applyPreset(res, info, extraDir, preset, cfg) {
   try {
     const p = info.path;
     if (/\.html?$/i.test(p)) {
-      const text = await res.text();
+      let text = await res.text();
+      // Build-tier entry bridge: docs that reference build output (or nothing) get wired to
+      // the repo's real source entry so CRA/rollup/webpack-style repos render too.
+      if (preset) text = await bridgeHtmlEntry(text, info, cfg.token || "");
       // Source apps are written for Vite dev's "/" URL, so client-side routers (React
       // Router, Vue Router…) see a pathname they have routes for. Rewrite the address to
       // "/" after load — document baseURI is unchanged, so relative module/asset URLs
       // keep resolving against the real file, and the original path survives as data
       // attribute for bug reports.
-      const routerFix = `<script>try{(function(){var p=location.pathname;if(p!=="/"){history.replaceState(null,"","/");document.documentElement.setAttribute("data-edgeqa-path",p);}})()}catch(e){}</script>`;
+      // CRA/webpack apps reference Node globals (`global`, `process.env`) that their bundler
+      // polyfills; provide them at document scope so transpiled source boots.
+      const routerFix = `<script>try{(function(){var p=location.pathname;if(p!=="/"){history.replaceState(null,"","/");document.documentElement.setAttribute("data-edgeqa-path",p);}})()}catch(e){}window.global=window;window.process={env:{NODE_ENV:"production"}};</script>`;
       return new Response(transformHtml(text) + routerFix + "<!--SW-DONE-->", { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
     const jsResp = (marker, body) => new Response(marker + body, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
@@ -256,17 +321,29 @@ async function applyPreset(res, info, extraDir, preset, cfg) {
       const r = await compileViaClient("vue", text, p, cfg);
       return jsResp(r.ok ? "/*SW-VUE*/" : "/*SW-VUE-FAIL*/", r.ok ? r.code : text);
     }
+    // JSON module imports: `import data from './config.json'` is a Vite staple but browsers
+    // reject application/json as a module script. When a .json is requested AS A SCRIPT
+    // (module import, not fetch()), serve it wrapped as an ES module. fetch() calls keep the
+    // raw JSON payload.
+    if (preset && /\.json$/i.test(p) && cfg.requestDest === "script") {
+      const text = await res.text();
+      return new Response(`export default ${text.trim() || "{}"};`, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-store" } });
+    }
     if (/\.(jsx|tsx|ts)$/i.test(p)) {
       const text = await res.text();
       if (!(await ensureBabel())) return jsResp("/*SW-BABEL-FAIL*/", text);
       return jsResp("/*SW-TRANSPILED*/", transpileModule(text, p, extraDir, cfg));
     }
-    // Plain ESM source (.js/.mjs) that isn't a build artifact: no JSX/SFC to transpile, but
-    // still run the shared post-processing (CSS/asset imports -> injectors/URLs, bare npm
-    // imports -> esm.sh) so depend-sparse entry files (Vue/Svelte main.js) load. Skipped for
-    // build output folders so committed bundles pass through untouched.
+    // Plain ESM source (.js/.mjs) that isn't a build artifact: JSX-family presets (react,
+    // preact, jsx) also transpile these — CRA apps keep JSX inside .js files — while other
+    // presets (vue/svelte) just post-process (CSS/asset imports -> injectors/URLs, bare npm
+    // imports -> esm.sh). Babel's react preset is a no-op on plain JS, so running it is safe.
     if (/\.(js|mjs)$/i.test(p) && !/(^|\/)(dist|build|out|output|bundles|bundle)\/|(^|\/)(dist|bundle)[^/]*\.js/i.test(p)) {
       const text = await res.text();
+      if (preset === "react" || preset === "preact" || preset === "jsx") {
+        if (!(await ensureBabel())) return jsResp("/*SW-BABEL-FAIL*/", text);
+        return jsResp("/*SW-TRANSPILED*/", transpileModule(text, p, extraDir, cfg));
+      }
       return jsResp("/*SW-REWRITTEN*/", postProcessJs(text, cfg, extraDir));
     }
   } catch (error) { log("preset transform failed", info.path, preset, String(error)); }
@@ -281,20 +358,25 @@ async function depVersionsFor(info) {
   if (depVersionsByScope.has(scope)) return depVersionsByScope.get(scope);
   const siteRoot = siteRootByScope.get(scope) || "";
   const token = tokenByScope.get(scope);
+  // Try the app root first (siteRoot), then fall back to the repo root — CRA/rollup-style
+  // repos keep index.html in public/ but package.json at the repo root.
+  const roots = siteRoot ? [siteRoot.replace(/\/+$/g, ""), ""] : [""];
   let pkg = null;
-  try {
-    if (token) {
-      const ep = `https://api.github.com/repos/${encodeURIComponent(info.owner)}/${encodeURIComponent(info.repo)}/contents/${siteRoot ? siteRoot + "/" : ""}package.json?ref=${encodeURIComponent(info.branch)}`;
-      const res = await fetch(ep, { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` } });
-      if (res.ok) {
-        const item = await res.json();
-        if (item && item.content) pkg = JSON.parse(new TextDecoder().decode(decodeBase64(item.content)));
+  for (const root of roots) {
+    try {
+      if (token) {
+        const ep = `https://api.github.com/repos/${encodeURIComponent(info.owner)}/${encodeURIComponent(info.repo)}/contents/${root ? root + "/" : ""}package.json?ref=${encodeURIComponent(info.branch)}`;
+        const res = await fetch(ep, { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` } });
+        if (res.ok) {
+          const item = await res.json();
+          if (item && item.content) { pkg = JSON.parse(new TextDecoder().decode(decodeBase64(item.content))); break; }
+        }
+      } else {
+        const raw = await fetch(`https://raw.githubusercontent.com/${info.owner}/${info.repo}/${info.branch}/${root ? root + "/" : ""}package.json`);
+        if (raw.ok) { pkg = await raw.json(); break; }
       }
-    } else {
-      const raw = await fetch(`https://raw.githubusercontent.com/${info.owner}/${info.repo}/${info.branch}/${siteRoot ? siteRoot + "/" : ""}package.json`);
-      if (raw.ok) pkg = await raw.json();
-    }
-  } catch { pkg = null; }
+    } catch { /* try next root */ }
+  }
   const map = pkg ? { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) } : null;
   depVersionsByScope.set(scope, map);
   return map;
@@ -478,7 +560,7 @@ self.addEventListener("fetch", (event) => {
       // of every esm.sh import so the whole graph shares ONE copy (duplicates break hooks).
       const frameworkPins = preset === "vue" ? ["vue"] : preset === "svelte" ? ["svelte"] : ["react", "react-dom", "preact"];
       const pinDeps = frameworkPins.map(pin).filter(Boolean).join(",");
-      const cfg = { dir: servedDir, aliasMap: aliasByScope.get(scopeOf(info)), localDirs: localDirsByScope.get(scopeOf(info)), depVersions, siteRoot: siteRootByScope.get(scopeOf(info)) || "", pinDeps };
+      const cfg = { dir: servedDir, aliasMap: aliasByScope.get(scopeOf(info)), localDirs: localDirsByScope.get(scopeOf(info)), depVersions, siteRoot: siteRootByScope.get(scopeOf(info)) || "", pinDeps, token, requestDest: event.request.destination, preset };
       const transformed = await applyPreset(response, info, extraDir, preset, cfg);
       if (transformed) { log("preset", preset, "applied to", info.path); response = transformed; }
     }

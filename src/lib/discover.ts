@@ -92,7 +92,14 @@ export function detectPreset(tree: { path: string; type: string }[], pkg: any): 
   const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
   if (deps["preact"]) return "preact";
   if (deps["react"] && deps["react-dom"]) return "react";
-  if (deps["vue"]) return "vue";
+  if (deps["vue"]) {
+    // Vue 2 repos (vue@2.x, or a vue-template-compiler devDep) can't run through the Vue 3
+    // compiler-sfc — the emitted runtime API calls (openBlock, createElementBlock…) don't
+    // exist in Vue 2 and the SFC syntax drifts. Degrade cleanly instead of miscompiling.
+    const vueVer = String(deps["vue"] || "").replace(/^[~^]/, "");
+    if (/^2(\.|$)/.test(vueVer) || deps["vue-template-compiler"]) return null;
+    return "vue";
+  }
   if (deps["svelte"]) return "svelte";
   // Solid/Angular/other committed frameworks whose JSX is NOT React: refusing a preset here is
   // better than mislabeling them as generic "jsx". The generic preset transpiles JSX to the React

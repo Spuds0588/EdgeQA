@@ -4,7 +4,92 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b1220" />
-    <title>EdgeQA — Private repos, public confidence</title>
+    <title>EdgeQA — Turn any GitHub repo into a secure QA preview link</title>
+    <meta name="description" content="EdgeQA turns any GitHub repository — private or public — into a secure, shareable QA environment with zero deploys and zero servers. Paste a fine-grained GitHub token, get a PIN-protected magic link, and let testers preview your app and file issues in context. Free, frontend-only, privacy-first." />
+    <meta name="keywords" content="QA preview, GitHub preview, staging without deploy, QA link, test preview, frontend QA, GitHub Pages QA, private repo preview, magic link, browser QA" />
+    <meta name="author" content="Corey Burns" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <link rel="canonical" href="https://spuds0588.github.io/EdgeQA/" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%23c9f36b'/%3E%3Cpath d='M3.6 7.6 2 12l1.6 4.4M20.4 7.6l1.6 4.4-1.6 4.4M10 2.8h4M10.8 2.8v6.9a1.8 1.8 0 0 1-.18.83L5.9 19.7a1 1 0 0 0 .9 1.5h10.4a1 1 0 0 0 .9-1.5l-4.72-9.17a1.8 1.8 0 0 1-.18-.83V2.8M7.3 16.2h9.4' stroke='%23172018' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="EdgeQA" />
+    <meta property="og:title" content="EdgeQA — Turn any GitHub repo into a secure QA preview link" />
+    <meta property="og:description" content="Secure, shareable QA environments for any GitHub repo. No deploys, no servers, no code leaving the browser. PIN-protected magic links, in-context bug reporting, works on mobile." />
+    <meta property="og:url" content="https://spuds0588.github.io/EdgeQA/" />
+    <meta property="og:locale" content="en_US" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="EdgeQA — Turn any GitHub repo into a secure QA preview link" />
+    <meta name="twitter:description" content="Secure, shareable QA environments for any GitHub repo. No deploys, no servers. PIN-protected magic links + in-context bug reporting." />
+    <meta name="twitter:creator" content="@Spuds0588" />
+
+    <!-- Structured data: the app + FAQ (AEO) + author identity -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebApplication",
+          "name": "EdgeQA",
+          "url": "https://spuds0588.github.io/EdgeQA/",
+          "applicationCategory": "DeveloperApplication",
+          "operatingSystem": "Any (Web Browser)",
+          "browserRequirements": "Requires JavaScript and Service Worker support",
+          "description": "EdgeQA turns any GitHub repository into a secure, shareable QA environment — no deploys, no servers. A service worker serves the repo's files straight from GitHub into a sandboxed preview, protected by a PIN-encrypted magic link, with in-context bug reporting straight to GitHub Issues.",
+          "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+          "isAccessibleForFree": true,
+          "author": { "@id": "#author" },
+          "publisher": { "@id": "#author" },
+          "license": "https://github.com/Spuds0588/EdgeQA/blob/main/LICENSE"
+        },
+        {
+          "@type": "FAQPage",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "What is EdgeQA?",
+              "acceptedAnswer": { "@type": "Answer", "text": "EdgeQA turns any GitHub repository into a secure, shareable QA environment — no deploys, no servers. A service worker serves the repo's files straight from GitHub into a sandboxed preview, and testers can file issues in context." }
+            },
+            {
+              "@type": "Question",
+              "name": "Does EdgeQA upload or store my code?",
+              "acceptedAnswer": { "@type": "Answer", "text": "No. Everything runs in your browser: files are fetched from GitHub by a service worker and served locally, so nothing is uploaded, proxied, or stored anywhere." }
+            },
+            {
+              "@type": "Question",
+              "name": "Is EdgeQA free? Do I need a token?",
+              "acceptedAnswer": { "@type": "Answer", "text": "Free and open source (MIT). Public repos preview with no token at all; private repos need a fine-grained GitHub PAT with Contents: Read, which stays in browser memory and is never sent to a server." }
+            },
+            {
+              "@type": "Question",
+              "name": "Which frameworks can EdgeQA preview?",
+              "acceptedAnswer": { "@type": "Answer", "text": "Static sites work as-is. React, Preact, JSX/TSX, Vue 3, and Svelte source repos are transpiled in the browser (experimental), with auto-detected aliases, dependency pinning, and a client-side router fix. Angular, Solid, and apps that need a real build step (Sass preprocessing, virtual modules) degrade cleanly." }
+            },
+            {
+              "@type": "Question",
+              "name": "Can AI agents or CI create QA links?",
+              "acceptedAnswer": { "@type": "Answer", "text": "Yes — the site exposes a WebMCP tool (create_qa_link) that WebMCP-capable agents can call, and the link format itself is a simple URL hash anyone can construct (see the README)." }
+            }
+          ]
+        },
+        {
+          "@type": "Person",
+          "@id": "#author",
+          "name": "Corey Burns",
+          "url": "https://github.com/Spuds0588",
+          "sameAs": [
+            "https://github.com/Spuds0588",
+            "https://www.linkedin.com/in/coreytburns/",
+            "https://www.youtube.com/@Corey_Burns",
+            "https://linktr.ee/CoreyBurns"
+          ]
+        }
+      ]
+    }
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,0 +1,20 @@
+User-agent: *
+Allow: /
+
+# LLM/AI crawlers are welcome — see llms.txt for a machine-readable summary
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+Sitemap: https://spuds0588.github.io/EdgeQA/sitemap.xml

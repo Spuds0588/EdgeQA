@@ -55,9 +55,9 @@ function makeSW(fetchImpl: FetchMock, extraSelf: Record<string, any> = {}) {
     async message(data: any) {
       await this.fire("message", { data });
     },
-    async fetchEvent(url: string) {
+    async fetchEvent(url: string, destination = "") {
       let respondWithPromise: Promise<Response> | undefined;
-      const event = { request: new Request(url), respondWith: (p: Promise<Response>) => void (respondWithPromise = p) };
+      const event = { request: destination ? { url, destination } : new Request(url), respondWith: (p: Promise<Response>) => void (respondWithPromise = p) };
       await this.fire("fetch", event);
       return respondWithPromise!;
     },
@@ -247,15 +247,143 @@ describe("edgeqa-sw VFS cache strategy", () => {
     expect(text).not.toContain(`from \"./Logo.svg\"`); // asset import rewritten to URL string
   });
 
-  it("preset scope: plain ESM .js source also gets bare imports rewritten (no babel)", async () => {
-    const sw = makeSW(htmlFetch(`import { createStore } from \"redux\";\nexport const s = createStore();`));
+  it("preset scope: JSX-family presets transpile .js files too (CRA-style JSX-in-.js), then rewrite imports", async () => {
+    const sw = makeSW(htmlFetch(`import { createStore } from \"redux\";\nexport const s = createStore();`), { Babel: { transform: (c: string) => ({ code: c }) } });
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "jsx" });
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/store.js");
-    expect(await res.text()).toContain("https://esm.sh/redux");
+    const text = await res.text();
+    expect(text).toContain("SW-TRANSPILED"); // babel ran — the react preset is a no-op on plain JS
+    expect(text).toContain("https://esm.sh/redux");
+  });
+
+  it("preset scope: JSX inside .js files is transpiled (CRA apps never used .jsx)", async () => {
+    const fakeBabel = { transform: (code: string, opts: any) => ({ code: `/*${opts.filename}*/` + code }) };
+    const sw = makeSW(htmlFetch("import React from 'react';\nexport const App = () => <div>hi</div>;"), { Babel: fakeBabel });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/index.js");
+    const text = await res.text();
+    expect(text).toContain("SW-TRANSPILED");
+    expect(text).toContain("/*src/index.js*/"); // babel ran on the .js file
+  });
+
+  it("preset scope: index.html with no scripts gets bridged to the source entry (CRA-style repos)", async () => {
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        if (url.endsWith("/public/index.html")) return ok('<html><body><div id="root"></div></body></html>', 200, "text/plain");
+        if (url.endsWith("/public/src/main.js")) return ok("import React from 'react';", 200, "text/plain");
+        return ok("not found", 404, "text/plain");
+      }
+      return ok("{}", 404, "application/json");
+    });
+    const sw = makeSW(fetchMock);
+    await sw.message({ type: "SET_PRESET", scope: "gothinkster/react-redux-realworld-example-app/master", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/gothinkster/react-redux-realworld-example-app/master/public/index.html");
+    const text = await res.text();
+    expect(text).toContain(`src=\"src/main.js\"`); // bridged entry, relative to the document dir
+    expect(fetchMock.mock.calls.some(([u]) => u.includes("/public/src/main.js"))).toBe(true);
+  });
+
+  it("preset scope: index.html referencing build output gets bridged to the source entry (rollup-style repos)", async () => {
+    const html = '<html><head><title>Svelte app</title></head><body><script defer src="/build/bundle.js"></script></body></html>';
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        if (url.endsWith("/public/index.html")) return ok(html, 200, "text/plain");
+        if (url.endsWith("/public/src/main.js")) return ok("import App from './App.svelte';", 200, "text/plain");
+        return ok("not found", 404, "text/plain");
+      }
+      return ok("{}", 404, "application/json");
+    });
+    const sw = makeSW(fetchMock);
+    await sw.message({ type: "SET_PRESET", scope: "sveltejs/template/master", preset: "svelte" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/sveltejs/template/master/public/index.html");
+    const text = await res.text();
+    expect(text).not.toContain("build/bundle.js"); // artifact ref replaced
+    expect(text).toContain(`src=\"src/main.js\"`);
+  });
+
+  it("preset scope: bridge falls back to the repo root when index.html sits in public/ (CRA layout)", async () => {
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        const u = new URL(url).pathname;
+        if (u.endsWith("/master/public/index.html")) return ok('<html><body><div id="root"></div></body></html>', 200, "text/plain");
+        if (u.endsWith("/master/src/index.js")) return ok("import React from 'react';", 200, "text/plain");
+        return ok("not found", 404, "text/plain");
+      }
+      return ok("{}", 404, "application/json");
+    });
+    const sw = makeSW(fetchMock);
+    await sw.message({ type: "SET_PRESET", scope: "gothinkster/react-redux-realworld-example-app/master", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/gothinkster/react-redux-realworld-example-app/master/public/index.html");
+    const text = await res.text();
+    expect(text).toContain(`src=\"../src/index.js\"`); // repo-root entry, ../-relative to the public/ doc
+  });
+
+  it("preset scope: preact-iso hydrate() is remapped to render() (SSG sites have no prerendered HTML)", async () => {
+    const src = `import * as preact from 'preact';\nimport { hydrate, prerender as ssr } from 'preact-iso';\nimport App from './components/app';\nif (typeof window !== 'undefined') { hydrate(<App />, document.getElementById('app')); }`;
+    const fakeBabel = { transform: (code: string, opts: any) => ({ code: `/*${opts.filename}*/` + code }) };
+    const sw = makeSW(htmlFetch(src), { Babel: fakeBabel });
+    await sw.message({ type: "SET_PRESET", scope: "preactjs/preact-www/master", preset: "preact" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/preactjs/preact-www/master/src/index.jsx");
+    const text = await res.text();
+    expect(text).toContain("render as hydrate"); // binding remapped
+    expect(text).not.toMatch(/import\s*\{[^}]*\bhydrate\b[^}]*\}\s*from\s*["']preact-iso/); // no plain hydrate import from preact-iso
+    expect(text).toMatch(/import\s*\{[^}]*render as hydrate[^}]*\}\s*from\s*["'][^"']*preact["']/); // render bound under the hydrate name (esm.sh-rewritten)
+    expect(text).toContain("from 'https://esm.sh/preact-iso'"); // still resolves preact-iso
+  });
+
+  it("preset scope: CSS module imports bind a class-map proxy and inject the stylesheet", async () => {
+    const sw = makeSW(htmlFetch("import style from './style.module.css';\nexport const x = style.page;"), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/App.jsx");
+    const text = await res.text();
+    expect(text).toContain("new Proxy({}, { get: (_t, k)"); // class map proxy
+    expect(text).toContain("style.module.css"); // injector references the stylesheet
+    expect(text).not.toContain("import style from"); // binding rewritten
+  });
+
+  it("preact preset compiles JSX against preact's own runtime (importSource: preact); react stays default", async () => {
+    let seenOpts: any = null;
+    const fakeBabel = { transform: (code: string, opts: any) => { seenOpts = opts; return { code }; } };
+    const sw = makeSW(htmlFetch("export const App = () => <div>x</div>;"), { Babel: fakeBabel });
+    await sw.message({ type: "SET_PRESET", scope: "preactjs/preact-www/master", preset: "preact" });
+    await sw.fetchEvent("http://localhost:4173/sandbox/preactjs/preact-www/master/src/app.jsx");
+    expect(seenOpts.presets[0][1].importSource).toBe("preact");
+    const sw2 = makeSW(htmlFetch("export const A = () => <b/>;"), { Babel: fakeBabel });
+    await sw2.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
+    await sw2.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/a.jsx");
+    expect(seenOpts.presets[0][1].importSource).toBeUndefined();
+  });
+
+  it("preset scope: JSON module imports are served as ES modules (Vite-style import of .json)", async () => {
+    const sw = makeSW(htmlFetch('{"name":"preact","version":"1"}'));
+    await sw.message({ type: "SET_PRESET", scope: "preactjs/preact-www/master", preset: "preact" });
+    // fetch() of a .json keeps the raw payload
+    const resFetch = await sw.fetchEvent("http://localhost:4173/sandbox/preactjs/preact-www/master/src/config.json");
+    expect((await resFetch.headers.get("Content-Type") || "")).toContain("json");
+    expect(await resFetch.text()).toBe('{"name":"preact","version":"1"}');
+    // a module import of a .json gets wrapped as an ES module
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/preactjs/preact-www/master/src/locales/en.json", "script");
+    expect((await res.headers.get("Content-Type") || "")).toContain("javascript");
+    expect(await res.text()).toContain("export default");
+  });
+
+  it("preset scope: vite-style index.html referencing real source is NOT bridged", async () => {
+    const fetchMock = vi.fn<FetchMock>(async (url: string) => {
+      if (url.startsWith("https://raw.githubusercontent.com/")) {
+        if (url.endsWith("/index.html")) return ok('<html><body><script type="module" src="/src/main.tsx"></script></body></html>', 200, "text/plain");
+        return ok("not found", 404, "text/plain");
+      }
+      return ok("{}", 404, "application/json");
+    });
+    const sw = makeSW(fetchMock);
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/index.html");
+    expect(await res.text()).toContain(`src=\"src/main.tsx\"`); // absolute ref made doc-relative, otherwise untouched
+    expect(fetchMock.mock.calls.some(([u]) => u.includes("/src/main.tsx") && u.includes("raw.githubusercontent"))).toBe(false); // no entry probing
   });
 
   it("preset scope: a rewritten bare import is byte-exact (no offset leaked after the specifier)", async () => {
-    const sw = makeSW(htmlFetch(`import { createStore } from \"redux\";\nimport app from \"./app.js\";`));
+    const sw = makeSW(htmlFetch(`import { createStore } from \"redux\";\nimport app from \"./app.js\";`), { Babel: { transform: (c: string) => ({ code: c }) } });
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "jsx" });
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/store.js");
     const text = await res.text();
@@ -393,7 +521,7 @@ describe("edgeqa-sw VFS cache strategy", () => {
   });
 
   it("preset scope: bare src/... imports (vite baseUrl style) resolve relative to the module", async () => {
-    const sw = makeSW(htmlFetch('import { fetchTags } from "src/services";\nexport const x = 1;'));
+    const sw = makeSW(htmlFetch('import { fetchTags } from "src/services";\nexport const x = 1;'), { Babel: { transform: (c: string) => ({ code: c }) } });
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "jsx", localDirs: ["src"], siteRoot: "" });
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
     const text = await res.text();
@@ -415,7 +543,7 @@ describe("edgeqa-sw VFS cache strategy", () => {
       if (url.includes("/package.json")) return ok(pkg, 200, "application/json");
       return ok('import { jsx } from "react/jsx-runtime";\nimport { L } from "lucide-react";\nimport React from "react";\nexport const A = () => jsx(L);', 200, "text/plain");
     });
-    const sw = makeSW(fetchMock);
+    const sw = makeSW(fetchMock, { Babel: { transform: (c: string) => ({ code: c }) } });
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/App.js");
     const text = await res.text();
@@ -431,7 +559,7 @@ describe("edgeqa-sw VFS cache strategy", () => {
       if (url.includes("/package.json")) return ok(pkg, 200, "application/json");
       return ok('import { yupResolver } from "@hookform/resolvers/yup";\nexport const r = yupResolver;', 200, "text/plain");
     });
-    const sw = makeSW(fetchMock);
+    const sw = makeSW(fetchMock, { Babel: { transform: (c: string) => ({ code: c }) } });
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/form.js");
     expect(await res.text()).toContain(`from \"https://esm.sh/@hookform/resolvers@%5E3.9.0/yup\"`);
@@ -467,7 +595,7 @@ describe("edgeqa-sw VFS cache strategy", () => {
   });
 
   it("preset scope: import.meta.env gets a Vite-style shim so apps don't crash", async () => {
-    const sw = makeSW(htmlFetch('console.log(import.meta.env.MODE);\nexport const x = import.meta.env.DEV;'));
+    const sw = makeSW(htmlFetch('console.log(import.meta.env.MODE);\nexport const x = import.meta.env.DEV;'), { Babel: { transform: (c: string) => ({ code: c }) } });
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
     const text = await res.text();
@@ -478,7 +606,7 @@ describe("edgeqa-sw VFS cache strategy", () => {
   });
 
   it("preset scope: import.meta.glob/globEager/hot get safe shims (empty map, undefined)", async () => {
-    const sw = makeSW(htmlFetch('const routes = import.meta.glob("./routes/*.ts");\nconst eager = import.meta.globEager("./comp/*");\nimport.meta.hot?.accept();\nexport const x = Object.keys(routes).length;'));
+    const sw = makeSW(htmlFetch('const routes = import.meta.glob("./routes/*.ts");\nconst eager = import.meta.globEager("./comp/*");\nimport.meta.hot?.accept();\nexport const x = Object.keys(routes).length;'), { Babel: { transform: (c: string) => ({ code: c }) } });
     await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
     const text = await res.text();

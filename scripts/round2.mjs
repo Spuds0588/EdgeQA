@@ -62,6 +62,28 @@ const REPOS = [
   // mermaid demos: real static site — the index page renders its own DOM (a live link list), not
   // inline SVGs (those live per-demo pages).
   { id: "mermaid",      repo: "mermaid-js/mermaid", branch: "develop", path: "demos", preset: "", expect: /Mermaid|quick test|demo|flowchart/i },
+  // ---- Round 4: fresh real apps on the supported build tiers ----
+  // realworld-react: the classic CRA-style React RealWorld app — JSX lives inside .js files
+  // (CRA never used .jsx for src files), which stresses the JSX-in-.js transform path plus
+  // react-router v4 + redux.
+  { id: "realworld-react", repo: "gothinkster/react-redux-realworld-example-app", branch: "master", path: "public", preset: "react", expect: /conduit|realworld|Sign in|New Post|Home|article|tag/i },
+  // preact-www: the Preact website itself — the flagship real Preact app (preact, signals,
+  // preact-iso router, markdown rendering).
+  { id: "preact-www", repo: "preactjs/preact-www", branch: "master", path: "", preset: "preact", expect: /preact|Preact|learn|docs|Get started|Guide|components/i },
+  // svelte-template: the official Svelte template (rollup, public/index.html) — validates the
+  // Svelte tier end-to-end on the reference repo.
+  { id: "svelte-template", repo: "sveltejs/template", branch: "master", path: "public", preset: "svelte", expect: /hello|world|svelte|Svelte|component|rollup/i },
+  // snapshot: a heavy real Vue 3 voting app (@snapshot-labs/* published deps, apollo client,
+  // ethers, web workers) — a full-scale stress test of the Vue tier.
+  { id: "snapshot", repo: "snapshot-labs/snapshot", branch: "master", path: "", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true }, // @snapshot-labs/lock/connectors/* fail esm.sh's ?deps-pinned builds (portis etc.), and the app fetches its own spaces data (snapshot-spaces) the sandbox can't provide
+  // vue-hackernews-2.0: a Vue 2 SSR app — detection must NOT pick the vue preset (the Vue 3
+  // compiler can't run Vue 2 SFCs). No index.html at root, so it must degrade to "no web app"
+  // without crashing. The detection fix itself is unit-tested in discover.test.ts.
+  { id: "vue2-hn", repo: "vuejs/vue-hackernews-2.0", branch: "master", path: "", preset: "", expect: null, degrade: true },
+  // Author's own fresh apps: ZipLayer (vanilla JS library + demo) and Sparrow-Offline-CRM
+  // (offline-first static CRM SPA).
+  { id: "ziplayer", repo: "Spuds0588/ZipLayer", branch: "main", path: "", preset: "", expect: /zip|Zip|download/i },
+  { id: "sparrow-crm", repo: "Spuds0588/Sparrow-Offline-CRM", branch: "main", path: "", preset: "", expect: /sparrow|Sparrow|CRM|customer|client/i, expectHtml: true },
 ];
 
 const results = [];
@@ -149,7 +171,7 @@ async function runRepo(browser, entry) {
     // compile output that doesn't parse, and compile-tier marker failures. App-level noise
     // (missing backend APIs, WebGL in headless, CORS'd analytics) must not fail a rendering app.
     const fatalErrors = [...consoleErrors, ...pageErrors, ...frameLogs].filter(
-      (e) => /Failed to resolve module specifier|Failed to fetch dynamically imported module|Importing a module script failed|does not provide an export named|Cannot use import statement outside a module|Unexpected token|SyntaxError: Unexpected|SW-SVELTE-FAIL|SW-VUE-FAIL|SW-BABEL-FAIL|is not a function|is not defined/.test(e),
+      (e) => /Failed to resolve module specifier|Failed to fetch dynamically imported module|Importing a module script failed|does not provide an export named|Cannot use import statement outside a module|Unexpected token|SyntaxError: Unexpected|SW-SVELTE-FAIL|SW-VUE-FAIL|SW-BABEL-FAIL|is not a function|is not defined/.test(e) && !/is not valid JSON/.test(e),
     );
     const rendered = entry.expect ? (entry.expectHtml ? entry.expect.test(snapshot.html) : entry.expect.test(snapshot.text)) : snapshot.htmlLen > 0;
     // degrade entries only need the document to load without module-tier failures (app-level

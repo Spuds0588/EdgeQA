@@ -40,7 +40,9 @@ Staging environments are a pain. Deploying every branch to a preview host is slo
 | **Bookmarklet** | One-click pre-fill from any GitHub repo page. |
 | **Saved QA links** | After generating a link, EdgeQA asks if you want to save it — stored PIN-encrypted in `localStorage` (never the token, never the PIN), with per-link copy / open / delete. Manage many sessions at once. |
 | **Encrypted backups** | Export all saved links as a JSON backup and re-import them on any browser — the payloads stay PIN-locked, so the backup is safe to move around. |
-| **Mobile QA** | The full preview + report flow works on phones. |
+| **Mobile QA** | The full preview + report flow works on phones. A link can also prefill your token on the setup screen (`#token=…`) — it's stripped from the URL the moment it's read, so it can't leak through a shared link. |
+| **WebMCP agent tool** | The site registers a `create_qa_link` tool via WebMCP (`document.modelContext.registerTool`), so WebMCP-capable coding/LLM agents can mint QA preview links for any public repo — tokenless — while browsing the site. Progressive enhancement: browsers without WebMCP just see the normal page. |
+| **SEO / AEO-ready** | Full meta + Open Graph + Twitter cards, JSON-LD structured data (WebApplication, FAQPage, author), `llms.txt`, `robots.txt`, and `sitemap.xml` so search engines and LLM agents can find and use EdgeQA. |
 
 ## How it works
 
@@ -116,17 +118,24 @@ The project deploys to GitHub Pages automatically on every push to `main` via `.
 
 **Bookmarklet:** on the setup screen, drag **⚡ Install bookmarklet** to your bookmarks bar. While viewing any GitHub repo, click it and EdgeQA opens with that repo pre-filled.
 
+**Prefill your token on mobile:** the GitHub app/PWA on Android can make pasting a long `github_pat_…` painful. You can open a link like `…#repo=acme/site&token=YOUR_TOKEN` and EdgeQA will prefill the token, run the connect check, and immediately strip the token out of the URL (`replaceState`) so it never survives in a shared link, a history entry, or a referrer. For anyone else, share the PIN-encrypted magic link instead — never a raw-token URL.
+
 **Share a read-only preview:** append `&readonly=1` to a session link (e.g. `…#demo&readonly=1` or a PIN-protected link plus `&readonly=1`) and the recipient gets a pure preview with no EdgeQA header and no way to file bugs — handy for walkthroughs and stakeholder review.
 
 ## Project structure
 
 ```
 public/edgeqa-sw.js      Service worker: VFS interceptor, GitHub API proxy, caching, SPA fallback, build tier
+public/llms.txt          LLM/agent-readable site summary (AEO)
+public/robots.txt        Crawler rules + sitemap pointer
+public/sitemap.xml       Sitemap
 src/main.tsx             App shell: landing page, setup flow, unlock flow, sandbox viewer + report drawer
 src/demo-element.js      Home-page animated demo (web component, swappable via <slot name="media">)
 src/lib/repo.ts          GitHub URL → owner/repo/branch parser (unit-tested)
 src/lib/discover.ts      Repo → entry-point/framework/alias discovery (unit-tested)
 src/lib/frame.ts         Page-side Vue/Svelte compiler delegation + module rewriting
+src/lib/qa-link.ts       Shared magic-link builder: PIN/AES-GCM payload crypto + canonical #hash assembly
+src/lib/webmcp.ts        WebMCP agent tool registration (create_qa_link)
 src/index.css            Design system (dark theme, tokens)
 tests/*.test.ts          Vitest unit tests (SW, discovery, URL parser)
 tests/edgeqa.spec.ts     Playwright e2e specs
@@ -145,21 +154,30 @@ scripts/round2.mjs       Real-repo regression harness: loads a repo preview thro
 
 Working today: link generation/decryption, the VFS service worker (with the real decrypted token handed off securely), repo-URL parsing, bookmarklet, the full landing experience, the in-context report drawer (desktop + mobile), **real GitHub issue creation** — reports are `POST`ed to the repo's Issues API with an `edgeqa-report` label; the drawer transparently shows the auto-attached session context (repo, branch, page, screensize, device/browser, time) and can include the session's **console log** (optional, on by default), with a link to the filed issue on success — **saved QA links** (opt-in per generation, PIN-encrypted in `localStorage`, with copy/open/delete and JSON **export/import backups**) — and a **tokenless live demo** (`/#demo`) that previews this repo's public `examples/northstar/` site so anyone can try the platform without a repo or PAT.
 
-Also working (experimental): the **in-browser build tier** — source repos for React / Preact / JSX+TSX / Vue / Svelte are transpiled in the browser, with framework auto-detection, `@`/`$lib` alias + baseUrl resolution from `tsconfig.json`/`vite.config`, package.json-pinned esm.sh dependency loading, and a client-side router URL fix. Round-2 (20 real public repos — calendar apps, whiteboards, emulator UIs, Vue/Svelte playgrounds, the repo owner's own projects) and round-3 (six fresh new apps: React `pmndrs/leva`, Vue `antfu/vitesse` + `element-plus` play, SolidJS `solid-playground`, and static `three.js` / `mermaid`) verified real apps render. Round-3 also added the **pnpm `catalog:` version-protocol fix** (Vitesse and other modern pnpm repos no longer pin to `@catalog%3Afrontend` and fail), the **`import.meta.glob/globEager` shims** (Vue apps that register dynamic routes/components no longer crash on the Vite-only API), and **Solid detection** (repos committed to `solid-js` are no longer mislabeled as React JSX and get a clean degrade instead of a confusing blank page). Remaining per-repo causes are documented in `scripts/round2.mjs`.
+Also working (experimental): the **in-browser build tier** — source repos for React / Preact / JSX+TSX / Vue / Svelte are transpiled in the browser, with framework auto-detection, `@`/`$lib` alias + baseUrl resolution from `tsconfig.json`/`vite.config`, package.json-pinned esm.sh dependency loading, and a client-side router URL fix. Round-2 (20 real public repos — calendar apps, whiteboards, emulator UIs, Vue/Svelte playgrounds, the repo owner's own projects) and round-3 (six fresh new apps: React `pmndrs/leva`, Vue `antfu/vitesse` + `element-plus` play, SolidJS `solid-playground`, and static `three.js` / `mermaid`) verified real apps render. Round-3 also added the **pnpm `catalog:` version-protocol fix** (Vitesse and other modern pnpm repos no longer pin to `@catalog%3Afrontend` and fail), the **`import.meta.glob/globEager` shims** (Vue apps that register dynamic routes/components no longer crash on the Vite-only API), and **Solid detection** (repos committed to `solid-js` are no longer mislabeled as React JSX and get a clean degrade instead of a confusing blank page).
+
+Round-4 (7 more fresh real apps, all on the supported build tiers) verified **CRA-style React** (JSX inside `.js` files now transpiles — `gothinkster/react-redux-realworld-example-app` renders), **Preact** (the preactjs website itself — hydrate→render bridge for preact-iso SSG, CSS-module proxy, JSON module support), **Svelte** (the official `sveltejs/template` — compiler version now follows the repo's pinned Svelte), the heavy Vue app **snapshot** (documented degrade: esm.sh can't build its `@snapshot-labs/lock/connectors/*` subpaths), **Vue 2** detection (not mislabeled as Vue 3 — degrades cleanly), and two of the author's own apps (ZipLayer, Sparrow-Offline-CRM). Round-4 added: the **source-entry HTML bridge** (CRA/rollup templates whose committed `index.html` references build artifacts or nothing — now bridged to the real `src/main.*`), **JSX-in-`.js` transpile**, **`.json` served as a module** when imported as a script, **JSON-module + bare-CSS package imports**, the **preact `hydrate` → `render as hydrate` bridge**, and the **CSS-module proxy** (`.module.css` default-import returns a key→className map). Remaining per-repo causes are documented in `scripts/round2.mjs`.
 
 Next up:
 
 - Angular source preview (needs an in-browser AOT seam — currently degrades gracefully).
 - CSS-level `@import "tailwindcss"` (Tailwind v4) needs a CSS build step; the app still boots, just un-styled.
 
-## Limitations
+## What EdgeQA can't preview (and how to fix it)
 
-- No server-side code execution (Node.js, PHP, API routes).
-- Apps that need injected `.env` secrets won't run in the sandbox.
-- Unpublished **workspace-only packages** (`@repo/ui`, `@tldraw/*`) can't resolve via esm.sh.
-- Packages esm.sh's build servers reject (e.g. `svelte-sonner`, `leva/headless`) won't load.
-- Angular and Solid source, and apps that need Vite build-step codegen (e.g. `vite-plugin-vue-layouts`' `virtual:*` modules), Sass preprocessing, or `import.meta.glob`-generated route maps, won't fully render — Solid/Angular are detected and degrade cleanly, the rest typically boot but render minimal content.
-- Highly complex bundler module graphs (nested Webpack/Vite resolution) are out of scope for now.
+EdgeQA runs the repo **as committed, in the browser**. Anything that needs a server, a build step, or injected secrets won't run — but many of these are easy to work around, and the rest degrade cleanly (you'll see "no web app" or a minimal page, never a crash):
+
+| Not supported | Why | The fix |
+| --- | --- | --- |
+| Server-side code (Node.js, PHP, API routes, Next.js pages) | No server executes code in the sandbox | Point the link at a static build output, or use the framework's static export into a `dist/`/`out/` folder committed to the repo |
+| Injected `.env` secrets | The sandbox can't read your `.env` | Preview with real-but-safe values committed (or none) — secrets never belong in a shareable QA link anyway |
+| Unpublished **workspace-only packages** (`@repo/ui`, `@tldraw/*`, `@element-plus/components/*`) | They don't exist on npm, so the esm.sh resolver 404s | Publish them (or the app) to npm, or point the link at the built bundle that inlines them |
+| Packages esm.sh's build servers reject (`svelte-sonner`, `leva/headless`) | esm.sh can't build them — an upstream limitation, not ours | Swap the import for a published alternative, or commit the built output |
+| Angular / Solid source | No in-browser compiler for those JSX dialects yet — detected automatically so they degrade cleanly instead of rendering nothing | Preview a static/compiled build instead |
+| Vite build-step codegen (`virtual:*` modules from `vite-plugin-vue-layouts`, `import.meta.glob`-generated route maps, Sass/Less preprocessing, Tailwind v4's `@import "tailwindcss"`) | These are compile-time steps the browser can't run | Commit the built `dist/` (or preprocessed CSS) — or wait; the `import.meta.glob`/`hot` shims already keep most such apps from crashing |
+| Highly complex bundler module graphs (nested Webpack/Vite resolution) | Out of scope for now | Commit a built bundle and preview that |
+
+**Best practice:** for the most reliable preview, commit your app's built output (`dist/`, `build/`, `docs/`) alongside source — EdgeQA then serves the real deployable, exactly as your hosting would. Source-repo previews (React/Vue/Svelte) are the convenience path and work for the vast majority of real apps tested.
 
 ## Sandbox origin & CORS
 

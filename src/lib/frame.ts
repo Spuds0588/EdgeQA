@@ -109,12 +109,33 @@ function rewriteAssetUrl(url: string, cfg?: RewriteCfg): string {
   return m ? m[2] : url;
 }
 
+// preact-iso SSG sites call hydrate(<App/>, container) — with no prerendered HTML in a
+// browser-only preview, hydrate renders nothing. preact-iso doesn't export render, so drop
+// hydrate from its import and bind render (from preact) under the hydrate name instead.
+// Mirrors the SW's copy.
+function remapPreactIsoHydrate(js: string): string {
+  return js.replace(/(import\s*\{)([^}]*?)(\}\s*from\s*["']preact-iso["'])/g, (m, head: string, names: string, tail: string) => {
+    if (!/\bhydrate\b/.test(names)) return m;
+    const rest = names.replace(/\bhydrate\b\s*,\s*/, "").replace(/\s*,\s*\bhydrate\b/, "").replace(/\s+/, " ").trim();
+    const isoImport = rest ? `${head}${rest}${tail}` : "";
+    return `import { render as hydrate } from 'preact';\n${isoImport}`.replace(/\n$/, "");
+  });
+}
+
 // Shared per-module post-processing (matches the SW's copy): CSS imports become stylesheet
 // injectors, asset imports become URL strings, and bare imports rewrite (aliases/local dirs
 // relative, npm packages to esm.sh with version pins).
 function postProcessJs(js: string, cfg?: RewriteCfg): string {
+  js = remapPreactIsoHydrate(js);
   js = shimEnv(js);
   const cssUrls: string[] = [];
+  // CSS modules: `import style from './x.module.css'` binds a class map (style.foo). We serve
+  // the source CSS unhashed, so a Proxy that returns the key as the class name matches the
+  // real selectors. Must run before the generic CSS-strip below. Mirrors the SW's copy.
+  js = js.replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+(['"])([^'"]+?\.module\.(?:css|scss|sass|less|styl))\2/g, (m, name, q, url) => {
+    cssUrls.push(rewriteAssetUrl(url, cfg));
+    return `const ${name} = new Proxy({}, { get: (_t, k) => (typeof k === "string" ? k : "") });`;
+  });
   js = js.replace(/(?:import\s+(?:[^'"]*?\s+from\s+)?)(['"])([^'"]+?\.(?:css|scss|sass|less|styl))\1/g, (m, q, url) => { cssUrls.push(rewriteAssetUrl(url, cfg)); return ""; });
   js = js.replace(/import\s+([A-Za-z_$][\w$]*)\s+from\s+(['"])([^'"]+?\.(?:png|jpe?g|gif|webp|svg|ico|avif|bmp|mp4|webm|mp3|wav|ogg|woff2?|ttf|eot))\2/g, (m, name, q, url) => `const ${name} = new URL(${q}${url}${q}, import.meta.url).href;`);
   if (cssUrls.length) {
@@ -131,8 +152,13 @@ function simpleHash(s: string): string { let h = 0; for (let i = 0; i < s.length
 // css:injected, so the output is a single module with styles attached; svelte/internal/*
 // (bare) imports rewrite to esm.sh like any other.
 export async function compileSvelteText(text: string, path: string, cfg?: RewriteCfg): Promise<string> {
+  // Compile with the repo's pinned Svelte major when known — Svelte 5's compiler emits Svelte 5
+  // runtime calls (runes, Symbol($state)) that crash against a Svelte 3 runtime. esm.sh resolves
+  // the range (^3.55.0 -> 3.x), so pass the raw pin through.
+  const pinned = cfg?.depVersions?.svelte;
+  const ver = pinned && !/^(workspace|file|link|npm|github|catalog):/i.test(pinned) ? encodeURIComponent(pinned) : "5";
   // @vite-ignore: this is a runtime esm.sh import, never a bundled dep.
-  const { compile }: any = await import(/* @vite-ignore */ `${ESM_CDN}svelte@5/compiler`);
+  const { compile }: any = await import(/* @vite-ignore */ `${ESM_CDN}svelte@${ver}/compiler`);
   const result = compile(text, { filename: path, name: componentName(path), generate: "client", css: "injected", dev: false });
   return postProcessJs((result.js && result.js.code) || "", cfg);
 }

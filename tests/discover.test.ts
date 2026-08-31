@@ -73,6 +73,18 @@ describe("detectPreset (framework detection)", () => {
     expect(detectPreset([{ path: "src/App.vue", type: "blob" }], {})).toBe("vue");
     expect(detectPreset([{ path: "src/App.svelte", type: "blob" }], {})).toBe("svelte");
   });
+
+  it("Vue 2 repos are refused (vue@2.x or vue-template-compiler) — the Vue 3 compiler can't run them", () => {
+    const tree = [{ path: "src/App.vue", type: "blob" }];
+    expect(detectPreset(tree, { dependencies: { vue: "^2.7.16" } })).toBeNull();
+    expect(detectPreset(tree, { dependencies: { vue: "2.6.14" } })).toBeNull();
+    expect(detectPreset(tree, { dependencies: { vue: "~2.5.17" } })).toBeNull();
+    // vue-template-compiler is the Vue 2 pairing — even when vue is listed loosely
+    expect(detectPreset(tree, { dependencies: { vue: "latest" }, devDependencies: { "vue-template-compiler": "^2.6.14" } })).toBeNull();
+    // Vue 3 pins still detect normally
+    expect(detectPreset(tree, { dependencies: { vue: "^3.4.0" } })).toBe("vue");
+    expect(detectPreset(tree, { dependencies: { vue: "3.5.13" } })).toBe("vue");
+  });
 });
 
 describe("aliasesFromTsconfig (source-path alias detection)", () => {
