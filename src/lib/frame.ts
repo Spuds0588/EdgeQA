@@ -10,7 +10,11 @@ const ESM_CDN = "https://esm.sh/";
 
 // Resolve a site-root-relative target path from a module's directory — the same
 // "relative to the importing module" semantics Vite gives aliases/baseUrl imports.
-function relFrom(fromDir: string, toPath: string): string {
+export function relFrom(fromDir: string, toPath: string): string {
+  // Absolute URLs (esm.sh, data:, blob:, https://…) and root-absolute paths are final —
+  // the CSS-injector path re-enters here with an already-rewritten esm.sh URL, and treating
+  // its scheme as a path segment mangles it ("src/router/https:/esm.sh/…").
+  if (/^(?:[a-z][a-z0-9+.\-]*:|\/)/i.test(toPath || "")) return toPath;
   // Filter empty segments on BOTH sides: a module served at an extensionless directory URL
   // (src/api) yields dir "src/api/" whose trailing empty segment would inflate `from.length`
   // and emit a phantom extra "../". Mirrors the `to` side.
@@ -60,6 +64,196 @@ function relDirFrom(fromDir: string, toDir: string): string {
   return (ups ? "../".repeat(ups) : "./") + down;
 }
 
+// Vite `define` globals: templates in the vue-element-admin family (and webpack-era peers)
+// reference build-time JSON injected via vite.config's `define` (e.g. __APP_INFO__) unguarded
+// at module scope. Provide a module-scoped stand-in so `const { pkg } = __APP_INFO__` boots
+// and the app renders (fake) package metadata instead of ReferenceError-ing the whole graph.
+// Mirrors the SW's copy.
+const VITE_DEFINE_SHIMS: Record<string, string> = {
+  __APP_INFO__: `{ pkg: { name: "preview", version: "0.0.0", description: "", author: "", homepage: "" }, lastBuildTime: "" }`,
+};
+export function shimWebpackAmd(js: string): string {
+  if (!/require\.context\b/.test(js) && !/\bdefine\s*\(/.test(js) && !/require\s*\[/.test(js)) return js;
+  js = js.replace(/require\.context\s*\(([^)]+)\)/g, (_m: string, args: string) =>
+    `((dir, sub, reg) => { const f = () => ({}); f.keys = () => []; f.id = 0; return f; })(${args})`
+  );
+  js = js.replace(/\bdefine\s*\([^)]*function[^)]*\)\s*\{/g, "{}; /*amd-define*/ { ");
+  js = js.replace(/\bdefine\s*\([^)]*\)\s*;?/g, "; /*amd-define*/ ");
+  js = js.replace(/require\s*\[([^\]]+)\]\s*,\s*(?:function[^)]*\)|[^;]+)/g, "; /*amd-require*/ ");
+  return js;
+}
+
+export function shimViteGlobals(js: string): string {
+  let out = js;
+  for (const [name, value] of Object.entries(VITE_DEFINE_SHIMS)) {
+    if (new RegExp(`\\b${name}\\b`).test(out)) out = `const ${name} = ${value};\n` + out;
+  }
+  return out;
+}
+
+// webpack/vue-cli-era source (vue-admin-better, the vue-element-admin template family…) is
+// written in CommonJS: `require('./default')` + `module.exports = Object.assign(...)`. ESM
+// can't execute either directly, so convert the dominant shapes: destructuring/default requires
+// become imports, and `module.exports` writes route through a stub object that ends up as the
+// module's default export. When the assigned RHS is a plain object literal its keys are ALSO
+// emitted as named exports, so importers using `import { k } from './config'` link even without
+// the importer-side namespace fallback. Mirrors the SW's copy.
+export function shimCommonJS(js: string): string {
+  if (!/\brequire\s*\(/.test(js) && !/\bmodule\.exports\b/.test(js) && !/(^|[^.\w])exports\.\w/.test(js)) return js;
+  const head: string[] = [];
+  js = js.replace(/const\s*\{([^}]*)\}\s*=\s*require\s*\(\s*(['"])([^'"]+)\2\s*\)\s*;?/g, (_m, names: string, q: string, spec: string) => {
+    head.push(`import { ${names.trim()} } from ${q}${spec}${q};`);
+    return "";
+  });
+  js = js.replace(/const\s+([A-Za-z_$][\w$]*)\s*=\s*require\s*\(\s*(['"])([^'"]+)\2\s*\)\s*;?/g, (_m, name: string, q: string, spec: string) => {
+    head.push(`import ${name} from ${q}${spec}${q};`);
+    return "";
+  });
+  // Bare statement requires (`require('@/mock')` — the classic vue-cli main.js mock/prod
+  // loading pattern) become side-effect imports. Only statement positions are matched;
+  // expression positions (foo(require('x'))) are left alone.
+  js = js.replace(/(^|\n)\s*require\s*\(\s*(['"])([^'"]+)\2\s*\)\s*;?/g, (_m, pre: string, q: string, spec: string) => {
+    head.push(`import ${q}${spec}${q};`);
+    return pre;
+  });
+  // Statically-enumerable keys of a `module.exports = { ... }` object literal (shorthand or
+  // key: value) become named exports; anything non-trivial (Object.assign(…), expressions)
+  // stays default-only and relies on the importer-side `?? default?.` fallback.
+  let named: string[] = [];
+  js = js.replace(/module\.exports\s*=\s*([^;]+);/g, (m, expr: string) => {
+    named = [];
+    const lit = expr.trim().match(/^\{([\s\S]*)\}$/);
+    if (lit) {
+      let depth = 0; const parts: string[] = []; let cur = "";
+      for (const ch of lit[1]) {
+        if (ch === "{" || ch === "(" || ch === "[") depth++;
+        else if (ch === "}" || ch === ")" || ch === "]") depth--;
+        if (ch === "," && depth === 0) { parts.push(cur); cur = ""; }
+        else cur += ch;
+      }
+      if (cur.trim()) parts.push(cur);
+      for (const part of parts) {
+        const kn = part.trim().match(/^([A-Za-z_$][\w$]*)\s*(?::.*)?$/);
+        if (!kn) { named = []; break; }
+        named.push(kn[1]);
+      }
+    }
+    return `__edgeqaCjsMod.exports = ${expr};`;
+  });
+  // Replace remaining bare writes (handles the no-semicolon/EOF case the object-literal
+  // regex can't see), then declare the stub ONLY when the transformed source references it —
+  // the object-literal replace already consumed `module.exports =` by this point, so a check
+  // for the original spelling would miss the most common shape and `__edgeqaCjsMod` would be
+  // undefined at runtime.
+  js = js.replace(/\bmodule\.exports\b/g, "__edgeqaCjsMod.exports").replace(/(^|[^.\w])exports\./g, "$1__edgeqaCjsMod.exports.");
+  if (/\b__edgeqaCjsMod\b/.test(js) && !/\b(?:const|let|var)\s+__edgeqaCjsMod\b/.test(js)) js = "const __edgeqaCjsMod = { exports: {} };\n" + js;
+  let out = (head.length ? head.join("\n") + "\n" : "") + js;
+  if (/\b__edgeqaCjsMod\b/.test(out)) {
+    // Named exports for importers. A key matching an existing module-scope binding (imported
+    // name, const/function…) must be RE-exported (`export { k }`), never redeclared with
+    // `export const k` — that is a SyntaxError on an already-declared identifier.
+    const bound = new Set();
+    for (const m of out.matchAll(/\b(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)) bound.add(m[1]);
+    for (const m of out.matchAll(/import\s*\{([^}]*)\}\s*from/g)) for (const p of m[1].split(",")) { const n = p.trim().split(/\s+as\s+/)[0].trim(); if (n) bound.add(n); }
+    for (const m of out.matchAll(/import\s+([A-Za-z_$][\w$]*)\s+from/g)) bound.add(m[1]);
+    out += `\nexport default __edgeqaCjsMod.exports;`;
+    for (const k of named) out += bound.has(k) ? `\nexport { ${k} };` : `\nexport const ${k} = __edgeqaCjsMod.exports.${k};`;
+  }
+  return out;
+}
+
+// CJS interop, importer side: vue-cli-era templates import named bindings from CJS modules
+// (`import { recordRoute } from '@/config'` where config does `module.exports = Object.assign`).
+// ESM can't statically name exports off a plain object, so for imports of LOCAL modules
+// (relative/alias/baseUrl) rewrite the named-import statement to a namespace import plus a safe
+// binding — `ns.name ?? ns.default?.name` — which binds whether the target turned out to be real
+// ESM (named export) or CJS-transformed (default object). Bare npm imports keep native semantics.
+// Mirrors the SW's copy.
+// Repo-relative extensionless paths of modules this pipeline has SERVED. ESM targets stay in
+// esmTargets; shimCommonJS-converted ones go in cjsTargets. Importer-side named imports keep
+// native live bindings when the target is a KNOWN-ESM module — rewriting them to eager
+// destructures TDZs cyclic graphs (vue3-element-admin's stores: index re-exports ./user, user
+// imports `store` from index, and the namespace read fires before index's `const store`
+// initializes). Unknown targets (not yet served — they're fetch-ordered after the importer)
+// and known-CJS ones get the namespace+default fallback. Modules are crawled dependency-first,
+// so a target that is a DEPENDENCY of the importer is always classified before the importer's
+// own transform runs. Mirrors the SW's registry.
+const cjsTargets = new Set<string>();
+const esmTargets = new Set<string>();
+export const extlessPath = (p: string) => p.split(/[?#]/)[0].replace(/\.[a-z0-9]+$/i, "");
+
+export function cjsInteropNamedImports(js: string, cfg?: RewriteCfg, modulePath?: string, knownEsm?: ReadonlySet<string>): string {
+  let cjsNsSeq = 0;
+  // Resolve a local spec to the repo-relative extensionless path the pipeline serves and
+  // check the esmTargets registry (populated when the target file was actually served
+  // without CJS conversion). Known-ESM targets keep native live bindings; unknown/CJS
+  // targets get the namespace+default fallback.
+  const reg = knownEsm || esmTargets;
+  const isKnownEsm = (spec: string): boolean => {
+    if (!spec || !cfg) return false;
+    const rootPrefix = cfg.siteRoot ? cfg.siteRoot.replace(/\/+$/, "") + "/" : "";
+    let cand: string | null = null;
+    if (spec.startsWith(".")) {
+      const parts = (modulePath || cfg.dir || "").split("/").filter(Boolean);
+      parts.pop(); // drop the module file itself
+      for (const seg of spec.split("/")) {
+        if (seg === "" || seg === ".") continue;
+        if (seg === "..") parts.pop();
+        else parts.push(seg);
+      }
+      cand = parts.join("/");
+    } else if (cfg.aliasMap) {
+      for (const [key, root] of Object.entries(cfg.aliasMap)) {
+        if (spec === key || spec.startsWith(key + "/")) {
+          const rest = spec.slice(key.length).replace(/^\/+/, "");
+          cand = rootPrefix + (root ? root.replace(/\/+$/, "") + "/" + rest : rest);
+          break;
+        }
+      }
+      if (cand === null) return false;
+    } else if (cfg.localDirs && cfg.localDirs.includes(spec.split("/")[0])) {
+      cand = rootPrefix + spec;
+    } else return false;
+    const key = extlessPath(cand);
+    return reg.has(key) || reg.has(key.replace(/\/index$/, ""));
+  };
+  return js.replace(/(^|\n)\s*import\s*\{([^}]*)\}\s*from\s*(['"])([^'"]+)\3\s*;?/g, (m, pre: string, names: string, q: string, spec: string) => {
+    if (!spec) return m;
+    const first = spec.split("/")[0];
+    const aliasHit = !!(cfg?.aliasMap && Object.keys(cfg.aliasMap).some((k) => spec === k || spec.startsWith(k + "/")));
+    const localHit = !!(cfg?.localDirs && cfg.localDirs.includes(first));
+    if (spec.startsWith(".") || spec.startsWith("/") || aliasHit || localHit) {
+      // Local module: keep native live bindings ONLY when the target is a known-ESM module
+      // (cycle-safe); unknown targets (fetch-ordered after the importer) and CJS-converted
+      // ones get the namespace+default fallback.
+      if (isKnownEsm(spec)) return m;
+    } else {
+      // npm module: esm.sh collapses UMD/CJS packages to default-only, so named imports of
+      // those (file-saver's `import { saveAs }`) need the namespace+default fallback. Skip
+      // URLs and synthetic specs (virtual:, data:) that never make it to esm.sh.
+      if (/^(virtual:|data:|blob:|https?:|\/)/i.test(spec)) return m;
+    }
+    const parts = names.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!parts.length || parts.some((p) => /^type\s/.test(p))) return m;
+    const bindings: { orig: string; alias?: string }[] = [];
+    for (const p of parts) {
+      const mm = p.match(/^([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?$/);
+      if (!mm) return m; // exotic binding (default+named mix, string names…) — leave statement alone
+      bindings.push({ orig: mm[1], alias: mm[2] });
+    }
+    // Multiple named imports in one module must each get a UNIQUE namespace binding —
+    // reusing the same name is a SyntaxError (vue3-element-admin imports @/settings and
+    // @/router in one file, etc.).
+    let ns = "__edgeqaCjsNs";
+    if (cjsNsSeq > 0) ns += cjsNsSeq;
+    cjsNsSeq++;
+    while (new RegExp(`\\b${ns}\\b`).test(js)) ns += "_";
+    const lines = [`import * as ${ns} from ${q}${spec}${q};`];
+    for (const b of bindings) lines.push(`const ${b.alias || b.orig} = ${ns}.${b.orig} ?? ${ns}.default?.${b.orig};`);
+    return pre + "\n" + lines.join("\n");
+  });
+}
+
 // Rewrite bare specifiers to what the browser can actually fetch (mirrors the SW's copy):
 // local dirs and aliases become module-relative paths, npm packages become absolute esm.sh
 // URLs pinned to the repo's package.json version when known. Relative (./), absolute (/),
@@ -100,24 +294,32 @@ function rewriteBareImports(js: string, cfg?: RewriteCfg): string {
     // `virtual:*` imports (vite-plugin-svg-icons' `import "virtual:svg-icons-register"`, vite-plugin-
     // vue-layouts' `virtual:generated-layouts`, etc.) are Vite-codegen modules with no real file.
     // As a bare name they'd be mistaken for a "virtual:" URL scheme and blocked by the browser, so
-    // rewrite them to a synthetic module (siteRoot/__edgeqa_virtual__/<name>.js) that the SW serves
-    // as an empty ES module — a no-op side-effect import that lets the app boot without its SVG sprite.
+    // rewrite them to a synthetic module at the REPO ROOT (__edgeqa_virtual__/<name>.js) that the SW
+    // serves as an empty ES module — a no-op side-effect import that lets the app boot without its
+    // SVG sprite. Repo-root targeting (not siteRoot-prefixed) keeps the URL matchable at subfolder
+    // entries too (arco-design-pro-vite). Mirrors the SW's copy.
     if (spec.startsWith("virtual:")) {
       const name = spec.slice("virtual:".length).replace(/[^A-Za-z0-9_\-/.\$]/g, "_") || "module";
-      const rootPrefix = cfg!.siteRoot ? cfg!.siteRoot + "/" : "";
-      return `${ctx}${q}${relFrom(cfg!.dir || "", rootPrefix + "__edgeqa_virtual__/" + name + ".js")}${endq}`;
+      return `${ctx}${q}${relFrom(cfg!.dir || "", "__edgeqa_virtual__/" + name + ".js")}${endq}`;
     }
+    // Relative/absolute/URL specifiers resolve on their own — route them back before the
+    // package-json shim below, or local `@/config/settings.json` (a real repo file the SW can
+    // serve as an ES module) would be mistaken for an npm subpath and swapped for the empty
+    // virtual shim.
+    if (spec.startsWith(".") || spec.startsWith("/") || /^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) return m;
     // A bare *npm* subpath ending in .json (e.g. `import icons from "@iconify-json/ep/icons.json"`,
     // the Iconify offline-icon pattern every admin uses) becomes an esm.sh URL that serves
     // application/json — browsers reject JSON as a module script without an import assertion.
     // Vite inlines those at build time; here we route them to the empty-module shim so the app
     // boots (the icon collection just doesn't register — app-level data, not module failure).
-    if (/\/[A-Za-z0-9_.\-]+\.json$/.test(spec)) {
+    // Alias/local/relative specs are EXCLUDED — those are real repo files the SW serves as
+    // ES modules (e.g. @/config/settings.json in arco-design-pro).
+    const isAliasSpec = !!(cfg!.aliasMap && Object.keys(cfg!.aliasMap).some((k) => spec === k || spec.startsWith(k + "/")));
+    const isLocalSpec = !!(cfg!.localDirs && cfg!.localDirs.includes(spec.split("/")[0]));
+    if (!isLocalSpec && !isAliasSpec && /\/[A-Za-z0-9_.\-]+\.json$/.test(spec)) {
       const name = "json-" + spec.replace(/[^A-Za-z0-9_.$-]/g, "_").replace(/\.json$/, "");
-      const rootPrefix = cfg!.siteRoot ? cfg!.siteRoot + "/" : "";
-      return `${ctx}${q}${relFrom(cfg!.dir || "", rootPrefix + "__edgeqa_virtual__/" + name + ".js")}${endq}`;
+      return `${ctx}${q}${relFrom(cfg!.dir || "", "__edgeqa_virtual__/" + name + ".js")}${endq}`;
     }
-    if (spec.startsWith(".") || spec.startsWith("/") || /^data:|^[a-z][a-z0-9+.\-]*:/i.test(spec)) return m;
     const rootPrefix = cfg!.siteRoot ? cfg!.siteRoot + "/" : "";
     const first = spec.split("/")[0];
     if (cfg!.localDirs && cfg!.localDirs.includes(first)) {
@@ -205,11 +407,27 @@ function remapPreactIsoHydrate(js: string): string {
 // Shared per-module post-processing (matches the SW's copy): CSS imports become stylesheet
 // injectors, asset imports become URL strings, and bare imports rewrite (aliases/local dirs
 // relative, npm packages to esm.sh with version pins).
-function postProcessJs(js: string, cfg?: RewriteCfg): string {
+function postProcessJs(js: string, cfg?: RewriteCfg, modulePath?: string): string {
   js = remapPreactIsoHydrate(js);
   js = shimEnv(js, cfg?.env);
+  // Vite `define` globals (__APP_INFO__) and CJS (require/module.exports) from webpack-era
+  // source. The CJS conversion emits real imports, so it must run before the CSS/asset strips
+  // (a `require('./x.css')`-converted `import './x.css'` still becomes a stylesheet injector)
+  // and before the bare-import rewrite (converted specifiers still resolve aliases/esm.sh).
+  js = shimWebpackAmd(js);
+  js = shimViteGlobals(js);
+  const beforeCjs = js;
+  js = shimCommonJS(js);
+  if (modulePath) {
+    const key = extlessPath(modulePath);
+    const reg = js !== beforeCjs ? cjsTargets : esmTargets;
+    reg.add(key);
+    if (/\/index$/.test(key)) reg.add(key.replace(/\/index$/, ""));
+  }
   const extraDir = cfg?.extraDir;
-  const offset = (u: string) => (extraDir ? `./${extraDir}/${u}` : u);
+  // Absolute URLs (esm.sh rewrites, data:, root-relative) must pass through untouched —
+  // prefixing extraDir onto them mangles `/https:/…` style paths. Mirrors the SW's copy.
+  const offset = (u: string) => (!extraDir || /^[a-z][a-z0-9+.\-]*:|^\//i.test(u) ? u : `./${extraDir}/${u}`);
   const cssUrls: string[] = [];
   // CSS modules: `import style from './x.module.css'` binds a class map (style.foo). We serve
   // the source CSS unhashed, so a Proxy that returns the key as the class name matches the
@@ -231,6 +449,9 @@ function postProcessJs(js: string, cfg?: RewriteCfg): string {
   if (extraDir) {
     js = js.replace(/((?:from\s+|import\s*\(|(?:^|[\n]\s*)import\s+|export\s+[^;]*?from\s+))(["'])((?:\.\.?\/)[^"']*)/g, (m, ctx, q, rel) => `${ctx}${q}./${extraDir}/${rel}`);
   }
+  // Local named imports into CJS-transformed modules need the namespace+default fallback so
+  // `import { recordRoute } from '@/config'` binds whether config is ESM-named or default-only.
+  js = cjsInteropNamedImports(js, cfg, modulePath);
   return rewriteBareImports(js, cfg);
 }
 
@@ -299,10 +520,10 @@ export async function compileSvelteText(text: string, path: string, cfg?: Rewrit
       try { source = preserveSucraseImports(text, sucrase.transform(text, { transforms: ["typescript"] }).code || text); } catch { /* keep raw on failure */ }
     }
     const result = svelte.compileModule(source, { filename: path, generate: "client", dev: false });
-    return postProcessJs((result.js && result.js.code) || "", cfg);
+    return postProcessJs((result.js && result.js.code) || "", cfg, path);
   }
   const result = svelte.compile(text, { filename: path, name: componentName(path), generate: "client", css: "injected", dev: false });
-  return postProcessJs((result.js && result.js.code) || "", cfg);
+  return postProcessJs((result.js && result.js.code) || "", cfg, path);
 }
 
 // unplugin-auto-import (and Vue's <script setup> ergonomics) let real Vue apps use the
@@ -311,6 +532,7 @@ export async function compileSvelteText(text: string, path: string, cfg?: Rewrit
 // auto-imported name the SFC actually references but never binds, inject the real import.
 const VUE_AUTO_IMPORTS = ["ref", "reactive", "computed", "watch", "watchEffect", "watchPostEffect", "watchSyncEffect", "onMounted", "onUnmounted", "onBeforeUnmount", "onUpdated", "onBeforeMount", "onBeforeUpdate", "onActivated", "onDeactivated", "onErrorCaptured", "onRenderTracked", "onRenderTriggered", "onScopeDispose", "onServerPrefetch", "nextTick", "toRef", "toRefs", "toValue", "provide", "inject", "getCurrentInstance", "h", "createApp", "defineAsyncComponent", "markRaw", "shallowRef", "shallowReactive", "isRef", "unref", "isReactive", "isReadonly", "readonly", "customRef", "triggerRef", "effectScope", "getCurrentScope", "useAttrs", "useSlots", "useTemplateRef", "useId", "useModel", "mergeProps", "isProxy", "toRaw", "isShallow", "isVNode", "cloneVNode", "defineComponent"];
 const ROUTER_AUTO_IMPORTS = ["useRoute", "useRouter", "useLink", "onBeforeRouteLeave", "onBeforeRouteUpdate"];
+const PINIA_AUTO_IMPORTS = ["defineStore", "storeToRefs", "mapState", "mapGetters", "mapActions", "mapMutations"];
 
 function injectVueAutoImports(code: string): string {
   const bound = new Set<string>();
@@ -327,7 +549,7 @@ function injectVueAutoImports(code: string): string {
     const need = names.filter((n) => !bound.has(n) && new RegExp(`\\b${n}\\b`).test(code));
     return need.length ? `import { ${need.join(", ")} } from "${from}";` : "";
   };
-  const lines = [inject(VUE_AUTO_IMPORTS, "vue"), inject(ROUTER_AUTO_IMPORTS, "vue-router")].filter(Boolean);
+  const lines = [inject(VUE_AUTO_IMPORTS, "vue"), inject(ROUTER_AUTO_IMPORTS, "vue-router"), inject(PINIA_AUTO_IMPORTS, "pinia")].filter(Boolean);
   return lines.length ? lines.join("\n") + "\n" + code : code;
 }
 
@@ -387,5 +609,5 @@ export async function compileVueText(text: string, path: string, cfg?: RewriteCf
     : (scoped ? `\nexport default { render, __scopeId: ${JSON.stringify(id)} };` : `\nexport default { render };`);
   const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
   code = injectVueAutoImports(code);
-  return postProcessJs(code, { ...cfg, dir: cfg?.dir || dir });
+  return postProcessJs(code, { ...cfg, dir: cfg?.dir || dir }, path);
 }

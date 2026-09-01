@@ -325,9 +325,10 @@ describe("edgeqa-sw VFS cache strategy", () => {
     await sw.message({ type: "SET_PRESET", scope: "preactjs/preact-www/master", preset: "preact" });
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/preactjs/preact-www/master/src/index.jsx");
     const text = await res.text();
-    expect(text).toContain("render as hydrate"); // binding remapped
-    expect(text).not.toMatch(/import\s*\{[^}]*\bhydrate\b[^}]*\}\s*from\s*["']preact-iso/); // no plain hydrate import from preact-iso
-    expect(text).toMatch(/import\s*\{[^}]*render as hydrate[^}]*\}\s*from\s*["'][^"']*preact["']/); // render bound under the hydrate name (esm.sh-rewritten)
+    // remap: hydrate binding now comes from preact (via the namespace+default fallback,
+    // since npm named imports rewrite for esm.sh's default-only UMD/CJS output)
+    expect(text).not.toMatch(/\bhydrate\b[^}]*from\s*["']preact-iso/); // no hydrate import from preact-iso
+    expect(text).toContain("const hydrate = __edgeqaCjsNs.render ?? __edgeqaCjsNs.default?.render;"); // render bound under the hydrate name
     expect(text).toContain("from 'https://esm.sh/preact-iso'"); // still resolves preact-iso
   });
 
@@ -656,6 +657,112 @@ describe("edgeqa-sw VFS cache strategy", () => {
     const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/lib/routeTree.gen");
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("SW-TRANSPILED");
+  });
+
+  it("preset scope: vite define globals (__APP_INFO__) get a module-scoped shim", async () => {
+    const sw = makeSW(htmlFetch('const { pkg } = __APP_INFO__;\nexport const title = pkg.name;'), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/settings.js");
+    const text = await res.text();
+    expect(text).toContain("const __APP_INFO__ = { pkg:");
+    expect(text).not.toContain("__APP_INFO__ is not defined");
+    const clean = htmlFetch('export const x = 1;');
+    const sw2 = makeSW(clean, { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw2.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "react", siteRoot: "" });
+    const untouched = await sw2.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/other.js");
+    expect(await untouched.text()).not.toContain("__APP_INFO__");
+  });
+
+  it("preset scope: CommonJS modules (require/module.exports) convert to ESM", async () => {
+    const body = "const { setting } = require('./default');\nconst locked = true;\nmodule.exports = { setting, locked, routes: 3 };\n";
+    const sw = makeSW(htmlFetch(body), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/config/index.js");
+    const text = await res.text();
+    // require -> import; the pipeline's importer-side interop then rebinds the LOCAL named
+    // import through the namespace (with default fallback) so it links whether the target
+    // module is ESM or CJS-transformed.
+    expect(text).toContain("import * as __edgeqaCjsNs from './default';");
+    expect(text).toContain("const setting = __edgeqaCjsNs.setting ?? __edgeqaCjsNs.default?.setting;");
+    expect(text).toContain("export default __edgeqaCjsMod.exports;");
+    // The stub must ALWAYS be declared (object-literal rewrite consumes `module.exports`
+    // before the old check ran — ReferenceError in real vue-cli configs).
+    expect(text).toContain("const __edgeqaCjsMod = { exports: {} };");
+    // module.exports keys: imported/declared keys are re-exported, fresh keys become `export const`
+    expect(text).toContain("export { setting };");
+    expect(text).toContain("export { locked };");
+    expect(text).toContain("export const routes = __edgeqaCjsMod.exports.routes;");
+    expect(text).not.toContain("require(");
+    expect(text).not.toContain("module.exports");
+  });
+
+  it("preset scope: named imports of CJS/default-only modules bind via namespace + default fallback", async () => {
+    // vue-admin-better pattern: `import { recordRoute } from '@/config'` where config does
+    // `module.exports = Object.assign(...)` — no statically-nameable exports. The importer
+    // must bind through the namespace OR the default object, whichever the target serves.
+    const sw = makeSW(htmlFetch('import { recordRoute, permission } from "@/config";\nexport const r = recordRoute(permission);'), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", alias: { "@": "src" }, localDirs: ["src"], siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/layout/vab-avatar/index.js");
+    const text = await res.text();
+    expect(text).toContain("import * as __edgeqaCjsNs from \"../../config\""); // @/config from src/layout/vab-avatar/
+    expect(text).toContain("const recordRoute = __edgeqaCjsNs.recordRoute ?? __edgeqaCjsNs.default?.recordRoute;");
+    expect(text).toContain("const permission = __edgeqaCjsNs.permission ?? __edgeqaCjsNs.default?.permission;");
+    expect(text).not.toContain("import { recordRoute");
+  });
+
+  it("preset scope: bare npm named imports rewrite to namespace + default fallback (esm.sh's UMD/CJS output is default-only)", async () => {
+    // file-saver regression: esm.sh serves `export { k as default }` for UMD/CJS packages, so
+    // `import { saveAs } from 'file-saver'` dies with "does not provide an export named 'saveAs'".
+    const sw = makeSW(htmlFetch('import { useRouter } from "vue-router";\nexport const x = useRouter;'), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", localDirs: ["src"], siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
+    const text = await res.text();
+    expect(text).toContain("import * as __edgeqaCjsNs from \"https://esm.sh/vue-router\"");
+    expect(text).toContain("const useRouter = __edgeqaCjsNs.useRouter ?? __edgeqaCjsNs.default?.useRouter;");
+    expect(text).not.toContain("import { useRouter }");
+  });
+
+  it("preset scope: named imports of already-served ESM targets keep native live bindings (cycle-safe)", async () => {
+    // vue3-element-admin regression: stores/index re-exports ./user; user imports
+    // `{ store } from '@/stores'` and the target was already served (dependency-first crawl)
+    // as a native ESM module — the eager namespace destructure would read `store` before
+    // index's `const store = createPinia()` initializes (TDZ).
+    const sw = makeSW(htmlFetch('import { store } from "@/stores";\nexport const r = () => store.x;'), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", alias: { "@": "src" }, localDirs: ["src"], siteRoot: "" });
+    await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/stores/index.js"); // served first: classifies as ESM
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/stores/user.js");
+    const text = await res.text();
+    expect(text).toContain("import { store } from \"../stores\""); // alias-rewritten, native form
+    expect(text).not.toContain("__edgeqaCjsNs");
+  });
+
+  it("preset scope: local JSON imports stay local (never the virtual shim); npm json subpaths still shim", async () => {
+    const sw = makeSW(htmlFetch('import settings from "@/config/settings.json";\nexport default settings.appTitle;'), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", alias: { "@": "src" }, localDirs: ["src"], siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
+    const text = await res.text();
+    expect(text).toContain("from \"./config/settings.json\""); // alias-resolved real file
+    expect(text).not.toContain("__edgeqa_virtual__");
+    const sw2 = makeSW(htmlFetch('import icons from "@iconify-json/ep/icons.json";\nexport const i = icons;'), { Babel: { transform: (c: string) => ({ code: c }) } });
+    await sw2.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", siteRoot: "" });
+    const res2 = await sw2.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/main.js");
+    expect((await res2.text())).toContain("__edgeqa_virtual__/json-");
+  });
+
+  it("preset scope: served .json module requests are wrapped as ES modules", async () => {
+    const sw = makeSW(htmlFetch('{ "appTitle": "EdgeQA", "debug": false }'));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", siteRoot: "" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/src/config/settings.json", "script");
+    const text = await res.text();
+    expect(text).toBe("export default { \"appTitle\": \"EdgeQA\", \"debug\": false };");
+  });
+
+  it("preset scope: virtual module shims are served at the repo root for subfolder apps too", async () => {
+    const sw = makeSW(htmlFetch(""));
+    await sw.message({ type: "SET_PRESET", scope: "acme/site/main", preset: "vue", alias: { "@": "src" }, localDirs: ["src"], siteRoot: "frontend" });
+    const res = await sw.fetchEvent("http://localhost:4173/sandbox/acme/site/main/__edgeqa_virtual__/json-__config_settings.js");
+    expect(res.status).toBe(200);
+    expect((await res.text())).toContain("export default {}");
   });
 
   it("verified-public tokenless scope: missing file is 'no web app', not locked", async () => {

@@ -3,6 +3,7 @@
 // in real Chromium, then reports what rendered and what broke.
 //
 // Usage: bun scripts/round2.mjs            (full run, all repos)
+//        bun scripts/round2.mjs vue3-element-admin   (one repo)
 //        bun scripts/round2.mjs owner/repo  (single repo)
 import { chromium } from "playwright";
 import { spawn } from "node:child_process";
@@ -125,6 +126,36 @@ const REPOS = [
   // unpublished workspace `@vben/*` + `@sa/*` packages + internal UI packages, so it must degrade
   // cleanly to the Document root (whole app is a workspace build).
   { id: "vben-admin", repo: "vbenjs/vue-vben-admin", branch: "main", path: "apps/web-antd", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true, loadTimeout: 90_000 },
+  // ---- Round 7: more real Vue admin apps — new UI libraries, vue-cli-era source, monorepo degrades ----
+  // vue3-element-admin: a real Vue3 + Vite + Element-Plus + Pinia + TS admin (2.6k★) with
+  // @wangeditor-next, codemirror, exceljs, echarts deps. Pinia auto-imports now inject defineStore,
+  // but the stores/ tree has circular re-exports (index -> user -> index) that hit Chrome's
+  // directory-index TDZ edge — same issue documented for vue3-antd-admin.
+  { id: "vue3-element-admin", repo: "youlaitech/vue3-element-admin", branch: "master", path: "", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true, loadTimeout: 90_000 },
+  // ruoyi-vue3: the canonical RuoYi framework admin (6.7k★) — Vue3 + element-plus + pinia, entry
+  // src/main.js. Stresses deep element-plus ESM subpath imports, virtual:svg-icons-register shim,
+  // and scss-served-as-css. Degrades on file-saver: esm.sh wraps it as default-only CJS,
+  // so `import { saveAs } from 'file-saver'` fails the browser's static named-export check.
+  { id: "ruoyi-vue3", repo: "yangzongzhuan/RuoYi-Vue3", branch: "master", path: "", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true, loadTimeout: 90_000 },
+  // arco-pro: the official Arco Design Vue Pro app (1.8k★) living in arco-design-pro-vite/ — a THIRD
+  // UI library (arco, vs element/naive/antd), committed .env.development/.env.production, TS entry.
+  // Degrades on esm.sh CDN race: vue-router@4.6.4's pinned build hash sometimes returns a
+  // truncated variant that fails with SyntaxError in the browser (healthy via curl).
+  { id: "arco-pro", repo: "arco-design/arco-design-pro-vue", branch: "main", path: "arco-design-pro-vite", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true, loadTimeout: 90_000 },
+  // vue-admin-better: the 18.9k★ admin (vue3.0-antdv branch = Vue 3 + Ant Design Vue) built with
+  // vue-cli: index.html lives in public/ (bridged to src/main.js like CRA) and main.js branches on
+  // process.env.NODE_ENV — the document-scope process shim must be dev-flavored so the require()-based
+  // production mock branch never runs in the browser. Alias targets are site-root-relative, so @ must
+  // point up out of public/ to the repo-root src/. The webpack require.context + AMD define shims
+  // prevent module-graph crashes, but the app can't fully mount (mock/plugin loading returns empty).
+  { id: "vue-admin-better", repo: "zxwk1998/vue-admin-better", branch: "vue3.0-antdv", path: "public", preset: "vue", alias: "@:../src", local: "src", expect: null, degrade: true, loadTimeout: 90_000 },
+  // vea-admin: kailong321200875's vue-element-plus-admin (3.7k★) — apps/admin consumes unpublished
+  // workspace @vea/* packages, so the app can't boot from source; it must degrade cleanly (like vben).
+  { id: "vea-admin", repo: "kailong321200875/vue-element-plus-admin", branch: "master", path: "apps/admin", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true, loadTimeout: 90_000 },
+  // fantastic: the hooray fantastic-admin element-plus app (3.4k★) from the fantastic-admin/basic
+  // monorepo — apps/core-element-plus consumes unpublished workspace @core/* packages + pnpm catalog:
+  // deps; must degrade cleanly.
+  { id: "fantastic", repo: "fantastic-admin/basic", branch: "main", path: "apps/core-element-plus", preset: "vue", alias: "@:src", local: "src", expect: null, degrade: true, loadTimeout: 90_000 },
 ];
 
 const results = [];
@@ -143,31 +174,68 @@ async function waitForServer() {
 async function runRepo(browser, entry) {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await ctx.newPage();
-  const consoleErrors = [];
-  const pageErrors = [];
-  const failedReqs = [];
-  const frameLogs = [];
-  page.on("console", (msg) => {
-    if (msg.type() === "error" || msg.type() === "warning") {
-      const text = msg.text();
-      if (/\[edgeqa\]|Failed to load resource|net::ERR_/.test(text)) consoleErrors.push(text.slice(0, 300));
-      else if (msg.type() === "error") consoleErrors.push(text.slice(0, 300));
-    }
-  });
-  page.on("pageerror", (err) => pageErrors.push(String(err).slice(0, 300)));
-  page.on("requestfailed", (req) => {
-    const u = req.url();
-    if (!u.startsWith(BASE) && !u.includes("esm.sh") && !u.includes("unpkg") && !u.includes("raw.githubusercontent")) return;
-    failedReqs.push(`${req.failure()?.errorText || "failed"} ${u.slice(0, 160)}`);
-  });
+  const started = Date.now();
+  const runAttempt = async () => {
+    const consoleErrors = [];
+    const pageErrors = [];
+    const failedReqs = [];
+    const frameLogs = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error" || msg.type() === "warning") {
+        const text = msg.text();
+        const loc = msg.location()?.url ? ` @ ${msg.location().url}` : "";
+        if (/\[edgeqa\]|Failed to load resource|net::ERR_/.test(text)) consoleErrors.push(text.slice(0, 300) + loc);
+        else if (msg.type() === "error") consoleErrors.push(text.slice(0, 300) + loc);
+      }
+    });
+    page.on("pageerror", (err) => {
+      // Stack head carries the failing module URL for module-parse errors.
+      const stack = (err.stack || "").split("\n").slice(0, 2).join(" | ");
+      pageErrors.push(`${String(err).slice(0, 220)}${stack && !stack.includes(err.message) ? " :: " + stack.slice(0, 160) : ""}`);
+    });
+    page.on("requestfailed", (req) => {
+      const u = req.url();
+      if (!u.startsWith(BASE) && !u.includes("esm.sh") && !u.includes("unpkg") && !u.includes("raw.githubusercontent")) return;
+      failedReqs.push(`${req.failure()?.errorText || "failed"} ${u.slice(0, 160)}`);
+    });
 
+  if (process.env.EDGEQA_TRACE) {
+    await page.route("**esm.sh/**", async (route) => {
+      const resp = await route.fetch();
+      const body = await resp.body();
+      console.log(`  [esm-trace ${resp.status()}] ${route.request().url().slice(0, 110)} len=${body.length} head=${new TextDecoder().decode(body.slice(0, 60)).replace(/\n/g, " ")}`);
+      route.fulfill({ response: resp, body });
+    });
+  }
   const hash = new URLSearchParams({ repo: entry.repo, branch: entry.branch, public: "1" });
   if (entry.path) hash.set("path", entry.path);
   if (entry.preset) hash.set("preset", entry.preset);
   if (entry.local) hash.set("local", entry.local);
   if (entry.alias) hash.set("aliases", entry.alias);
-  const started = Date.now();
-  try {
+    // Warm the esm.sh cold-build path: the app's first parallel burst can hit a build-in-
+    // progress variant (truncated response, 512-byte stub) that permanently fails that load.
+    // Import the entry's own wrapper URLs from a background page so the CDN build settles
+    // before the sandbox asks. Only pre-warms the handful of top-level imports; the rest of
+    // the graph benefits from the warm edge anyway.
+    try {
+      const warm = await ctx.newPage();
+      await warm.goto("about:blank");
+      const entrySrc = await page.evaluate(() => document.querySelector("#sandbox")?.getAttribute("src") || "");
+      const warmImports = (entrySrc.match(/https:\/\/esm\.sh\/[^"'&?#\s]+/g) || []).slice(0, 6);
+      for (const u of warmImports) {
+        await warm.evaluate(async (url) => { try { await import(/* @vite-ignore */ url); } catch {} }, u).catch(() => {});
+      }
+      await warm.close().catch(() => {});
+    } catch { /* prewarm is best-effort */ }
+    // Raw CDP exceptions carry the source URL for module-eval/parse errors that cross the
+    // realm boundary without a stack ("Cannot access 'x' before initialization", etc.)
+    const cdp = await ctx.newCDPSession(page);
+    const cdpErrors = [];
+    cdp.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
+      const u = exceptionDetails?.url || (exceptionDetails?.exception?.description || "").match(/at (https?:\/\/[^ ]+)/)?.[1] || "";
+      const msg = exceptionDetails?.exception?.description || exceptionDetails?.text || "";
+      if (u || msg.includes("Cannot access") || /SyntaxError|Unexpected/.test(msg)) cdpErrors.push(`${msg.slice(0, 160)} ${u ? "@ " + u.slice(-140) : ""}`.trim());
+    });
     await page.goto(`${APP}#${hash.toString()}`, { waitUntil: "domcontentloaded", timeout: 20_000 });
     // The Viewer mounts the iframe only after the SW is ready
     await page.waitForSelector("#sandbox", { timeout: 25_000 });
@@ -190,11 +258,42 @@ async function runRepo(browser, entry) {
       throw new Error(`no sandbox frame found — ${JSON.stringify(diag)} frames=${JSON.stringify(allFrames)} console=${consoleErrors.slice(0, 3).join(" | ")} pageerr=${pageErrors.slice(0, 2).join(" | ")}`);
     }
     frame.on("console", (msg) => {
-      if (msg.type() === "error" || msg.type() === "warning") frameLogs.push(`${msg.type()}: ${msg.text().slice(0, 250)}`);
+      if (process.env.EDGEQA_DEBUG_CONSOLE) console.log(`  [frame-${msg.type()}] ${msg.text().slice(0, 280)}${msg.location()?.url ? " @ " + msg.location().url : ""}`);
+      if (msg.type() === "error" || msg.type() === "warning") {
+        // Include the source URL — Chromium points at the failing module for parse errors.
+        const loc = msg.location()?.url ? ` @ ${msg.location().url}` : "";
+        frameLogs.push(`${msg.type()}: ${msg.text().slice(0, 250)}${loc}`);
+      }
     });
     await frame.waitForLoadState("load", { timeout: entry.loadTimeout || 30_000 });
     // Give the app's JS time to boot (esm.sh imports, framework mount)
     await page.waitForTimeout(entry.preset ? 14_000 : 7_000);
+    if (process.env.EDGEQA_INSPECT_URL) {
+      const perf = await frame.evaluate(() => {
+        const bad = performance.getEntriesByType("resource").filter((r) => r.name.includes("esm.sh") && (!r.decodedBodySize || r.decodedBodySize < 200));
+        const vrs = performance.getEntriesByType("resource").filter((r) => r.name.includes("vue-router"));
+        return { total: performance.getEntriesByType("resource").length, bad: bad.slice(0, 4).map((r) => ({ n: r.name.slice(-70), dec: r.decodedBodySize })), vrs: vrs.map((r) => ({ n: r.name.slice(-70), dec: r.decodedBodySize })) };
+      }).catch(() => null);
+      console.log(`  perf-esm: ${JSON.stringify(perf)}`);
+      const frameInsp = await frame.evaluate(async (u) => {
+        try { const m = await import(/* @vite-ignore */ u); return "FRAME-OK " + Object.keys(m).slice(0, 4).join(","); }
+        catch (e) { return "FRAME-FAIL " + String(e).slice(0, 200); }
+      }, process.env.EDGEQA_INSPECT_URL).catch((e) => "frame-eval-error: " + String(e).slice(0, 120));
+      console.log(`  frame-import ${process.env.EDGEQA_INSPECT_URL.slice(0, 100)}: ${frameInsp}`);
+      const insp = await page.evaluate(async (u) => {
+        try {
+          const r = await fetch(u);
+          const t = await r.text();
+          let parse = "ok";
+          try { new Function(t); } catch (e) { parse = "FUNCFAIL " + String(e).slice(0, 80); }
+          let module = "n/a";
+          try { const m = await import(/* @vite-ignore */ u); module = "OK " + Object.keys(m).slice(0, 4).join(","); }
+          catch (e) { module = "IMPORTFAIL " + String(e).slice(0, 130); }
+          return { status: r.status, len: t.length, head: t.slice(0, 70), parse, module };
+        } catch (e) { return { err: String(e).slice(0, 180) }; }
+      }, process.env.EDGEQA_INSPECT_URL);
+      console.log(`  inspect ${process.env.EDGEQA_INSPECT_URL.slice(0, 110)}: ${JSON.stringify(insp)}`);
+    }
     const snapshot = await frame.evaluate(() => {
       const body = document.body;
       const text = (body?.innerText || "").replace(/\n+/g, " ").slice(0, 700);
@@ -211,7 +310,8 @@ async function runRepo(browser, entry) {
     // Only EdgeQA-tier failures are fatal: unresolved/transpiled-away module specifiers,
     // compile output that doesn't parse, and compile-tier marker failures. App-level noise
     // (missing backend APIs, WebGL in headless, CORS'd analytics) must not fail a rendering app.
-    const fatalErrors = [...consoleErrors, ...pageErrors, ...frameLogs].filter(
+    for (const e of cdpErrors.slice(0, 4)) console.log(`  cdp: ${e}`);
+    const fatalErrors = [...consoleErrors, ...pageErrors, ...frameLogs, ...cdpErrors].filter(
       (e) => /Failed to resolve module specifier|Failed to fetch dynamically imported module|Importing a module script failed|does not provide an export named|Cannot use import statement outside a module|Unexpected token|SyntaxError: Unexpected|SW-SVELTE-FAIL|SW-VUE-FAIL|SW-BABEL-FAIL|is not a function|is not defined/.test(e) && !/is not valid JSON/.test(e),
     );
     const rendered = entry.expect ? (entry.expectHtml ? entry.expect.test(snapshot.html) : entry.expect.test(snapshot.text)) : snapshot.htmlLen > 0;
@@ -222,8 +322,29 @@ async function runRepo(browser, entry) {
       (e) => /Failed to resolve module specifier|Failed to fetch dynamically imported module|Importing a module script failed|does not provide an export named|Cannot use import statement outside a module|SW-SVELTE-FAIL|SW-VUE-FAIL|SW-BABEL-FAIL/.test(e),
     );
     const pass = entry.degrade ? snapshot.htmlLen > 0 && moduleFatal.length === 0 : rendered && fatalErrors.length === 0;
-    results.push({ id: entry.id, pass, rendered, fatalErrors: fatalErrors.slice(0, 5), consoleErrors: consoleErrors.slice(0, 5), pageErrors: pageErrors.slice(0, 3), frameLogs: frameLogs.slice(0, 5), failedReqs: failedReqs.slice(0, 6), elapsed, snapshot });
-    console.log(`\n=== ${entry.id} (${entry.repo}${entry.path ? "/" + entry.path : ""} ${entry.preset || "static"}) — ${pass ? "PASS" : "FAIL"} in ${elapsed}s ===`);
+    // Any EdgeQA-tier fatal is potentially a cold esm.sh race; app-level noise never reaches
+    // fatalErrors, so a retry stays cheap and focused.
+    return { pass, retryable: fatalErrors.length > 0, rendered, fatalErrors: fatalErrors.slice(0, 5), consoleErrors: consoleErrors.slice(0, 5), pageErrors: pageErrors.slice(0, 3), frameLogs: frameLogs.slice(0, 5), failedReqs: failedReqs.slice(0, 6), elapsed, snapshot };
+  };
+  try {
+    let res = await runAttempt();
+    // esm.sh cold-build/edge races occasionally serve a truncated module on the first burst of
+    // parallel fetches (arco loads ~200 modules at once). Module-tier failures are retriable
+    // by a fresh load; app-level noise must not trigger it.
+    if (!res.pass && res.retryable) {
+      console.log(`  [retry] ${entry.id}: module-tier failure, reloading once`);
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => {});
+      res = await runAttempt();
+      res.retried = true;
+    }
+    results.push({ id: entry.id, pass: res.pass, rendered: res.rendered, fatalErrors: res.fatalErrors, consoleErrors: res.consoleErrors, pageErrors: res.pageErrors, frameLogs: res.frameLogs, failedReqs: res.failedReqs, elapsed: res.elapsed, snapshot: res.snapshot, retried: res.retried });
+    console.log(`\n=== ${entry.id} (${entry.repo}${entry.path ? "/" + entry.path : ""} ${entry.preset || "static"}) — ${res.pass ? "PASS" : "FAIL"} in ${res.elapsed}s${res.retried ? " (retried)" : ""} ===`);
+    const fatalErrors = res.fatalErrors;
+    const snapshot = res.snapshot;
+    const consoleErrors = res.consoleErrors;
+    const pageErrors = res.pageErrors;
+    const frameLogs = res.frameLogs;
+    const failedReqs = res.failedReqs;
     console.log(`  title: ${snapshot.title || "(none)"}`);
     console.log(`  body: ${snapshot.text.slice(0, 200) || "(EMPTY)"}`);
     if (fatalErrors.length) console.log(`  FATAL: ${fatalErrors.join(" ;; ")}`);
