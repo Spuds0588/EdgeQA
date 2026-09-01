@@ -4,6 +4,7 @@
 // any public GitHub repo — tokenless, so agents can drive the whole flow without credentials.
 // Tools are a progressive enhancement: browsers without WebMCP just run the normal site.
 import { buildQaLink, randomPin } from "./qa-link";
+import { qaNavigate, qaInspect, qaClick, qaGetConsole, qaEvaluate } from "./qa-agent";
 
 interface ModelContextLike {
   registerTool?: (tool: unknown, opts?: { signal?: AbortSignal }) => Promise<void>;
@@ -51,6 +52,121 @@ export async function registerEdgeQaAgentTools(): Promise<boolean> {
         return fields.join("\n");
       },
     });
+
+    // QA Agent Tools — allow coding/LLM agents to navigate, inspect, and test a running preview.
+    // These only work when the EdgeQA viewer is open (iframe loaded and SW bridge ready).
+
+    await mc.registerTool({
+      name: "qa_navigate",
+      description:
+        "Navigate the EdgeQA sandbox to a different URL or path. Use this to test different " +
+        "routes in the previewed app (e.g. '/login', '/dashboard'). Returns the navigation result.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "URL or path to navigate to (e.g. '/dashboard', './settings', 'https://example.com')" },
+        },
+        required: ["url"],
+      },
+      execute: async (args: { url: string }) => {
+        try {
+          const result = await qaNavigate(args.url);
+          return JSON.stringify(result);
+        } catch (e: any) {
+          return `Error: ${e.message}`;
+        }
+      },
+    });
+
+    await mc.registerTool({
+      name: "qa_inspect",
+      description:
+        "Inspect the current page in the EdgeQA sandbox. Returns the page URL, title, visible " +
+        "forms, links (up to 50), images (with broken detection), and a body text preview. " +
+        "Optionally pass a CSS selector to inspect specific elements.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "Optional CSS selector to inspect specific elements (e.g. '.error', '#app')" },
+          maxBody: { type: "number", description: "Max characters of body text to return (default: 3000)" },
+        },
+      },
+      execute: async (args: { selector?: string; maxBody?: number }) => {
+        try {
+          const result = await qaInspect({ selector: args.selector, maxBody: args.maxBody });
+          return JSON.stringify(result);
+        } catch (e: any) {
+          return `Error: ${e.message}`;
+        }
+      },
+    });
+
+    await mc.registerTool({
+      name: "qa_click",
+      description:
+        "Click an element in the EdgeQA sandbox by CSS selector. Use this to interact with " +
+        "buttons, links, or other clickable elements.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          selector: { type: "string", description: "CSS selector for the element to click (e.g. 'button.submit', 'a[href=\"/login\"]')" },
+        },
+        required: ["selector"],
+      },
+      execute: async (args: { selector: string }) => {
+        try {
+          const result = await qaClick(args.selector);
+          return JSON.stringify(result);
+        } catch (e: any) {
+          return `Error: ${e.message}`;
+        }
+      },
+    });
+
+    await mc.registerTool({
+      name: "qa_get_console",
+      description:
+        "Retrieve captured console log output from the EdgeQA sandbox. Returns log lines " +
+        "with their level (log/info/warn/error/debug), message text, and timestamp.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Max number of log lines to return (default: 200)" },
+          since: { type: "number", description: "Timestamp (ms) to filter logs from (default: 0 = all)" },
+        },
+      },
+      execute: async (args: { limit?: number; since?: number }) => {
+        try {
+          const result = await qaGetConsole({ limit: args.limit, since: args.since });
+          return JSON.stringify(result);
+        } catch (e: any) {
+          return `Error: ${e.message}`;
+        }
+      },
+    });
+
+    await mc.registerTool({
+      name: "qa_evaluate",
+      description:
+        "Evaluate a JavaScript expression in the EdgeQA sandbox context. Use this to read " +
+        "state, check DOM properties, or run logic inside the previewed app.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          expression: { type: "string", description: "JavaScript expression to evaluate (e.g. 'document.title', 'window.__appState')" },
+        },
+        required: ["expression"],
+      },
+      execute: async (args: { expression: string }) => {
+        try {
+          const result = await qaEvaluate(args.expression);
+          return JSON.stringify(result);
+        } catch (e: any) {
+          return `Error: ${e.message}`;
+        }
+      },
+    });
+
     return true;
   } catch {
     return false;

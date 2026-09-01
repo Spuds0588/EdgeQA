@@ -41,7 +41,7 @@ Staging environments are a pain. Deploying every branch to a preview host is slo
 | **Saved QA links** | After generating a link, EdgeQA asks if you want to save it — stored PIN-encrypted in `localStorage` (never the token, never the PIN), with per-link copy / open / delete. Manage many sessions at once. |
 | **Encrypted backups** | Export all saved links as a JSON backup and re-import them on any browser — the payloads stay PIN-locked, so the backup is safe to move around. |
 | **Mobile QA** | The full preview + report flow works on phones. A link can also prefill your token on the setup screen (`#token=…`) — it's stripped from the URL the moment it's read, so it can't leak through a shared link. |
-| **WebMCP agent tool** | The site registers a `create_qa_link` tool via WebMCP (`document.modelContext.registerTool`), so WebMCP-capable coding/LLM agents can mint QA preview links for any public repo — tokenless — while browsing the site. Progressive enhancement: browsers without WebMCP just see the normal page. |
+| **WebMCP agent tools** | Six WebMCP tools let coding/LLM agents act as automated QA testers: `create_qa_link` (mint preview links tokenless), `qa_navigate` (test routes), `qa_inspect` (DOM + broken-element detection), `qa_click` (interact with UI), `qa_get_console` (retrieve logs), and `qa_evaluate` (run JS in the sandbox). Progressive enhancement: browsers without WebMCP just see the normal page. |
 | **SEO / AEO-ready** | Full meta + Open Graph + Twitter cards, JSON-LD structured data (WebApplication, FAQPage, author), `llms.txt`, `robots.txt`, and `sitemap.xml` so search engines and LLM agents can find and use EdgeQA. |
 
 ## How it works
@@ -135,7 +135,8 @@ src/lib/repo.ts          GitHub URL → owner/repo/branch parser (unit-tested)
 src/lib/discover.ts      Repo → entry-point/framework/alias discovery (unit-tested)
 src/lib/frame.ts         Page-side Vue/Svelte compiler delegation + module rewriting
 src/lib/qa-link.ts       Shared magic-link builder: PIN/AES-GCM payload crypto + canonical #hash assembly
-src/lib/webmcp.ts        WebMCP agent tool registration (create_qa_link)
+src/lib/webmcp.ts        WebMCP agent tool registration (create_qa_link + QA tools)
+src/lib/qa-agent.ts       Parent-side QA bridge: sends commands to iframe, receives responses
 src/index.css            Design system (dark theme, tokens)
 tests/*.test.ts          Vitest unit tests (SW, discovery, URL parser)
 tests/edgeqa.spec.ts     Playwright e2e specs

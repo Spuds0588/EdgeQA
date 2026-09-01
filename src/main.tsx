@@ -9,6 +9,7 @@ import { loadBranches, loadIdentity, probeRepo } from "./lib/discover";
 import { compileSvelteText, compileVueText } from "./lib/frame";
 import { makePayload, randomPin, unlockPayload } from "./lib/qa-link";
 import { registerEdgeQaAgentTools } from "./lib/webmcp";
+import { setSandboxIframe, handleQaBridgeResponse } from "./lib/qa-agent";
 
 type Mode = "home" | "setup" | "unlock" | "viewer";
 
@@ -388,6 +389,13 @@ function Viewer({ repo, branch, path, token, preset, local, aliases, readonly, o
     };
     navigator.serviceWorker.addEventListener("message", handler); return () => navigator.serviceWorker.removeEventListener("message", handler);
   }, [repo, branch, baseRoot, token, preset, path, local, aliases]);
+  // QA agent bridge: listen for iframe responses and register the iframe ref.
+  useEffect(() => {
+    const qaHandler = (e: MessageEvent) => handleQaBridgeResponse(e);
+    window.addEventListener("message", qaHandler);
+    return () => window.removeEventListener("message", qaHandler);
+  }, []);
+  useEffect(() => { setSandboxIframe(iframeRef.current); }, [sandboxLoaded]);
   const submitIssue = async () => {
     if (!title.trim() || submitting) return;
     setSubmitting(true); setReportError(""); setIssueUrl(""); setDemoFiled(false);

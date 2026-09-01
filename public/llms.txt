@@ -10,7 +10,13 @@ Key facts for agents:
 - **Private by design.** A fine-grained GitHub PAT is encrypted in the browser (AES-GCM, PBKDF2) into the URL hash, unlocked only with the session PIN, and held in memory only. Never sent to a server, never stored.
 - **Public repos need no token.** Tokenless links carry a `&public` verification flag.
 - **Link format.** Hash-based and constructible by anyone: `https://spuds0588.github.io/EdgeQA/#repo=OWNER/REPO&branch=BRANCH&path=PATH&preset=PRESET&public`. No API key needed to build one.
-- **WebMCP tool.** The site registers a `create_qa_link` tool (`document.modelContext.registerTool`) so WebMCP-capable coding/LLM agents can mint QA links programmatically. Inputs: `owner`, `repo`, optional `branch`, `path`, `pin`.
+- **WebMCP tools.** The site registers six WebMCP tools (`document.modelContext.registerTool`) so coding/LLM agents can mint QA links AND act as automated QA testers:
+  - `create_qa_link` — mint a preview link (tokenless for public repos). Inputs: `owner`, `repo`, optional `branch`, `path`, `pin`.
+  - `qa_navigate` — navigate the sandbox to a URL/path. Input: `url`.
+  - `qa_inspect` — inspect the current page (DOM summary, broken images, forms, links, body preview). Inputs: optional `selector`, `maxBody`.
+  - `qa_click` — click an element by CSS selector. Input: `selector`.
+  - `qa_get_console` — retrieve captured console logs. Inputs: optional `limit`, `since`.
+  - `qa_evaluate` — run a JavaScript expression in the sandbox context. Input: `expression`.
 - **In-browser build tier (experimental).** React, Preact, JSX/TSX, Vue 3, and Svelte source repos are transpiled in the browser. Framework is auto-detected; dependency versions are pinned to the repo's package.json via esm.sh; `@`/`$lib` aliases and `src/...` baseUrl imports resolve automatically. Vue Pinia auto-imports (`defineStore`, `storeToRefs`) and webpack `require.context`/AMD `define` shims are injected when detected.
 - **Works on mobile.** The full preview + bug-report flow runs on phones.
 
